@@ -1,0 +1,15 @@
+const { contextBridge, ipcRenderer } = require('electron');
+
+// 暴露安全的API给渲染进程
+contextBridge.exposeInMainWorld('api', {
+  // 账号管理
+  getAccounts: () => ipcRenderer.invoke('get-accounts'),
+  addAccount: (accountData) => ipcRenderer.invoke('add-account', accountData),
+  editAccount: (accountData) => ipcRenderer.invoke('edit-account', accountData),
+  deleteAccount: (accountId) => ipcRenderer.invoke('delete-account', accountId),
+  loginAccount: (accountId) => ipcRenderer.invoke('login-account', accountId),
+  refreshAccountStatus: () => ipcRenderer.invoke('refresh-account-status'),
+  
+  // 平台信息
+  getPlatforms: () => ipcRenderer.invoke('get-platforms')
+}); 

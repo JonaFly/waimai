@@ -1,0 +1,145 @@
+{
+  "tags": {
+    "master": {
+      "description": "主要开发分支",
+      "tasks": [
+        {
+          "id": 1,
+          "title": "项目基础架构设置",
+          "description": "设置基础的项目结构、依赖库和配置文件。",
+          "details": "- 创建基础目录结构（src/main，src/renderer，public 等）\n- 设置 package.json 配置\n- 创建 .gitignore 文件\n- 创建 README.md 和 LICENSE 文件\n- 设计项目图标和基础资源",
+          "status": "done",
+          "dependencies": [],
+          "subtasks": []
+        },
+        {
+          "id": 2,
+          "title": "主进程基础功能实现",
+          "description": "实现 Electron 主进程的基础功能，包括窗口管理和应用生命周期。",
+          "details": "- 实现 main.js 的基础框架\n- 设置应用生命周期事件处理\n- 实现主窗口创建与管理\n- 添加开发环境相关配置\n- 实现基础 IPC 通信架构",
+          "status": "done",
+          "dependencies": [1],
+          "subtasks": []
+        },
+        {
+          "id": 3,
+          "title": "账号管理功能实现",
+          "description": "实现账号的管理、存储和加密功能。",
+          "details": "- 设计账号数据结构\n- 实现账号添加、编辑、删除功能\n- 实现账号加密存储功能\n- 实现账号状态管理\n- 添加账号列表获取功能",
+          "status": "done",
+          "dependencies": [2],
+          "subtasks": []
+        },
+        {
+          "id": 4,
+          "title": "浏览器窗口管理功能实现",
+          "description": "实现多浏览器窗口的管理和会话控制。",
+          "details": "- 实现窗口创建和管理类\n- 添加窗口生命周期管理\n- 实现会话隔离功能\n- 添加窗口显示、隐藏和关闭功能",
+          "status": "done",
+          "dependencies": [2],
+          "subtasks": []
+        },
+        {
+          "id": 5,
+          "title": "自动登录功能实现",
+          "description": "实现账号的自动登录功能，包括不同平台的登录流程。",
+          "details": "- 实现美团外卖平台的登录流程\n- 实现京东到家平台的登录流程\n- 添加登录状态检查机制\n- 实现会话恢复功能",
+          "status": "in-progress",
+          "dependencies": [3, 4],
+          "subtasks": []
+        },
+        {
+          "id": 6,
+          "title": "系统托盘功能实现",
+          "description": "实现系统托盘图标和菜单功能，支持快速操作。",
+          "details": "- 添加系统托盘图标\n- 实现托盘菜单\n- 添加账号快速切换功能\n- 实现应用最小化到托盘功能",
+          "status": "in-progress",
+          "dependencies": [2, 3],
+          "subtasks": []
+        },
+        {
+          "id": 7,
+          "title": "UI 设计与实现 - 主界面",
+          "description": "设计并实现应用的主界面。",
+          "details": "- 设计主界面布局\n- 实现账号列表和管理界面\n- 添加选项卡切换功能\n- 实现响应式布局设计",
+          "status": "done",
+          "dependencies": [1],
+          "subtasks": []
+        },
+        {
+          "id": 8,
+          "title": "UI 设计与实现 - 账号表单",
+          "description": "设计并实现账号添加和编辑表单。",
+          "details": "- 设计账号表单布局\n- 实现表单验证功能\n- 添加平台选择功能\n- 实现密码安全输入控件",
+          "status": "done",
+          "dependencies": [7],
+          "subtasks": []
+        },
+        {
+          "id": 9,
+          "title": "渲染进程与主进程通信实现",
+          "description": "实现渲染进程和主进程之间的安全通信。",
+          "details": "- 实现 preload.js 预加载脚本\n- 设计 IPC 通信接口\n- 添加 contextBridge 安全通信层\n- 实现渲染进程 API 调用封装",
+          "status": "done",
+          "dependencies": [2, 7],
+          "subtasks": []
+        },
+        {
+          "id": 10,
+          "title": "Cookies 和会话管理功能实现",
+          "description": "实现浏览器 Cookies 的保存和恢复功能，维持登录会话。",
+          "details": "- 设计 Cookies 存储结构\n- 实现 Cookies 加密存储功能\n- 添加会话恢复机制\n- 实现会话有效性检查功能",
+          "status": "in-progress",
+          "dependencies": [4, 5],
+          "subtasks": []
+        },
+        {
+          "id": 11,
+          "title": "错误处理与日志记录",
+          "description": "实现应用的错误处理和日志记录功能。",
+          "details": "- 设计错误处理机制\n- 添加应用日志记录功能\n- 实现用户友好的错误提示\n- 添加错误报告功能",
+          "status": "pending",
+          "dependencies": [2, 3, 4, 5],
+          "subtasks": []
+        },
+        {
+          "id": 12,
+          "title": "应用打包与分发配置",
+          "description": "配置应用的打包和分发选项。",
+          "details": "- 配置 electron-builder 打包选项\n- 设置各平台的打包配置\n- 添加应用图标和资源\n- 实现基础的自动更新机制",
+          "status": "pending",
+          "dependencies": [1],
+          "subtasks": []
+        },
+        {
+          "id": 13,
+          "title": "UI 交互优化与用户体验改进",
+          "description": "优化 UI 交互并改进用户体验。",
+          "details": "- 添加加载状态和过渡动画\n- 优化表单交互和验证反馈\n- 改进账号管理界面的用户体验\n- 添加操作提示和帮助信息",
+          "status": "pending",
+          "dependencies": [7, 8, 9],
+          "subtasks": []
+        },
+        {
+          "id": 14,
+          "title": "账号数据备份与恢复功能",
+          "description": "实现账号数据的备份和恢复功能。",
+          "details": "- 设计备份数据格式\n- 实现数据导出功能\n- 添加数据导入和恢复功能\n- 实现备份加密和验证",
+          "status": "pending",
+          "dependencies": [3, 10],
+          "subtasks": []
+        },
+        {
+          "id": 15,
+          "title": "应用测试与问题修复",
+          "description": "进行应用测试并修复发现的问题。",
+          "details": "- 设计测试用例\n- 进行功能测试\n- 执行兼容性测试\n- 修复发现的问题",
+          "status": "pending",
+          "dependencies": [2, 3, 4, 5, 6, 7, 8, 9, 10],
+          "subtasks": []
+        }
+      ]
+    }
+  },
+  "currentTag": "master"
+} 

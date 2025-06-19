@@ -1,0 +1,93 @@
+{
+  "name": "waimai-account-manager",
+  "version": "1.0.0",
+  "description": "外卖账号管理系统 - 管理多个外卖平台商家账号",
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "cross-env NODE_ENV=development electron .",
+    "build": "electron-builder --mac --win --linux",
+    "build:mac": "electron-builder --mac",
+    "build:win": "electron-builder --win",
+    "build:linux": "electron-builder --linux",
+    "pack:win": "electron-builder --win --dir",
+    "build:tool": "node scripts/build.js"
+  },
+  "build": {
+    "appId": "com.waimai.accountmanager",
+    "productName": "外卖账号管理系统",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "public/**/*",
+      "package.json",
+      "version.json",
+      "LICENSE"
+    ],
+    "mac": {
+      "category": "public.app-category.business",
+      "target": [
+        "dmg"
+      ],
+      "icon": "public/icons/icon.icns"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "public/icons/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "外卖账号管理系统",
+      "installerIcon": "public/icons/icon.ico",
+      "uninstallerIcon": "public/icons/icon.ico"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Office",
+      "icon": "public/icons/icon.png"
+    },
+    "artifactName": "${productName}-${version}-${arch}.${ext}"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yourusername/waimai.git"
+  },
+  "keywords": [
+    "外卖",
+    "账号管理",
+    "美团",
+    "京东",
+    "自动化"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "electron-store": "^8.2.0"
+  },
+  "devDependencies": {
+    "cross-env": "^7.0.3",
+    "electron": "^36.4.0",
+    "electron-builder": "^24.13.3"
+  }
+}
