@@ -37,18 +37,18 @@ jobs:
           echo "OS: $env:OS"
           echo "工作目录: $env:GITHUB_WORKSPACE"
           dir
-
-      # 缓存Electron
-      - name: 缓存Electron
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~\AppData\Local\electron\Cache
-            ~\AppData\Local\electron-builder\Cache
-            ${{ runner.temp }}\.electron-builder
-          key: windows-electron-cache-${{ hashFiles('**/package.json') }}
-          restore-keys: |
-            windows-electron-cache-
+          
+      - name: 确保图标目录存在
+        run: |
+          if (-not (Test-Path "public\icons")) {
+            New-Item -Path "public\icons" -ItemType Directory -Force
+          }
+          if (-not (Test-Path "public\icons\icon.ico")) {
+            Copy-Item "public\icon.png" -Destination "public\icons\icon.png" -Force
+            echo "创建空白图标文件"
+            New-Item -Path "public\icons\icon.ico" -ItemType File -Force
+          }
+          dir public\icons
 
       - name: 安装依赖
         run: |
@@ -57,36 +57,38 @@ jobs:
           npm config set electron_builder_binaries_mirror https://npmmirror.com/mirrors/electron-builder-binaries/
           npm ci
         
-      - name: 手动下载Electron
+      # 使用更简单的构建方式
+      - name: 构建Windows应用 (简化方式)
         run: |
-          $electronVersion = node -e "console.log(require('./package.json').devDependencies.electron.replace('^', ''))"
-          echo "Electron版本: $electronVersion"
+          # 创建简单的打包脚本
+          $packScript = @"
+          const { execSync } = require('child_process');
+          const fs = require('fs');
+          const path = require('path');
+          const packageJson = require('./package.json');
           
-          $electronCachePath = "$env:USERPROFILE\.electron"
-          if (-not (Test-Path $electronCachePath)) {
-            New-Item -ItemType Directory -Path $electronCachePath -Force
+          // 确保目录存在
+          if (!fs.existsSync('dist')) {
+            fs.mkdirSync('dist', { recursive: true });
           }
           
-          $electronZipUrl = "https://npmmirror.com/mirrors/electron/$electronVersion/electron-v$electronVersion-win32-x64.zip"
-          $electronZipPath = "$electronCachePath\electron-v$electronVersion-win32-x64.zip"
+          console.log('正在打包基本应用...');
+          execSync('npx electron-packager . "外卖账号管理系统" --platform=win32 --arch=x64 --out=dist --icon=public/icons/icon.ico --overwrite', { stdio: 'inherit' });
           
-          if (-not (Test-Path $electronZipPath)) {
-            echo "下载Electron: $electronZipUrl"
-            Invoke-WebRequest -Uri $electronZipUrl -OutFile $electronZipPath
-            echo "下载完成: $electronZipPath"
-          } else {
-            echo "Electron已缓存: $electronZipPath"
-          }
+          console.log('打包完成!');
+          console.log('输出目录:');
+          const distFiles = fs.readdirSync('dist');
+          console.log(distFiles);
+          "@
           
-          dir $electronCachePath
-      
-      - name: 构建Windows应用
-        run: |
-          $env:ELECTRON_SKIP_BINARY_DOWNLOAD = 1
-          npm run build:win
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          USE_HARD_LINKS: false
+          # 将脚本写入文件
+          Set-Content -Path "simple-pack.js" -Value $packScript
+          
+          # 安装electron-packager
+          npm install --no-save electron-packager
+          
+          # 运行打包脚本
+          node simple-pack.js
           
       - name: 检查构建结果
         run: |
@@ -97,19 +99,24 @@ jobs:
             echo "dist目录不存在"
           }
           
-      - name: 上传 Windows 安装包
+      - name: 创建ZIP压缩包
+        run: |
+          $appDir = Get-ChildItem -Path "dist" -Directory | Select-Object -First 1
+          if ($appDir) {
+            echo "压缩应用: $($appDir.FullName)"
+            Compress-Archive -Path "$($appDir.FullName)\*" -DestinationPath "dist\外卖账号管理系统-win-x64.zip" -Force
+            echo "压缩完成"
+          } else {
+            echo "未找到应用目录"
+            exit 1
+          }
+          
+      - name: 上传 Windows 应用
         uses: actions/upload-artifact@v4
         with:
-          name: windows-installer
+          name: windows-app
           path: |
-            dist/*.exe
-          if-no-files-found: warn
-            
-      - name: 上传 Windows 便携版
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-portable
-          path: dist/win-unpacked
+            dist/*.zip
           if-no-files-found: warn
             
   release:
@@ -142,8 +149,6 @@ jobs:
           draft: false
           prerelease: false
           files: |
-            dist/**/*.exe
             dist/**/*.zip
-          body_path: releases/v${{ steps.get_version.outputs.VERSION }}-release-notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
