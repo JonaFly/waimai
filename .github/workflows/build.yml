@@ -21,12 +21,22 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: 设置 Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 16
+          node-version: 18
           cache: 'npm'
+
+      - name: 显示环境信息
+        run: |
+          node --version
+          npm --version
+          echo "OS: $env:OS"
+          echo "工作目录: $env:GITHUB_WORKSPACE"
+          dir
 
       # 缓存Electron
       - name: 缓存Electron
@@ -36,20 +46,56 @@ jobs:
             ~\AppData\Local\electron\Cache
             ~\AppData\Local\electron-builder\Cache
             ${{ runner.temp }}\.electron-builder
-          key: ${{ runner.os }}-electron-cache-${{ hashFiles('**/package.json') }}
+          key: windows-electron-cache-${{ hashFiles('**/package.json') }}
           restore-keys: |
-            ${{ runner.os }}-electron-cache-
+            windows-electron-cache-
 
       - name: 安装依赖
         run: |
           npm config set registry https://registry.npmmirror.com/
+          npm config set electron_mirror https://npmmirror.com/mirrors/electron/
+          npm config set electron_builder_binaries_mirror https://npmmirror.com/mirrors/electron-builder-binaries/
           npm ci
         
+      - name: 手动下载Electron
+        run: |
+          $electronVersion = node -e "console.log(require('./package.json').devDependencies.electron.replace('^', ''))"
+          echo "Electron版本: $electronVersion"
+          
+          $electronCachePath = "$env:USERPROFILE\.electron"
+          if (-not (Test-Path $electronCachePath)) {
+            New-Item -ItemType Directory -Path $electronCachePath -Force
+          }
+          
+          $electronZipUrl = "https://npmmirror.com/mirrors/electron/$electronVersion/electron-v$electronVersion-win32-x64.zip"
+          $electronZipPath = "$electronCachePath\electron-v$electronVersion-win32-x64.zip"
+          
+          if (-not (Test-Path $electronZipPath)) {
+            echo "下载Electron: $electronZipUrl"
+            Invoke-WebRequest -Uri $electronZipUrl -OutFile $electronZipPath
+            echo "下载完成: $electronZipPath"
+          } else {
+            echo "Electron已缓存: $electronZipPath"
+          }
+          
+          dir $electronCachePath
+      
       - name: 构建Windows应用
-        run: npm run build:win
+        run: |
+          $env:ELECTRON_SKIP_BINARY_DOWNLOAD = 1
+          npm run build:win
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           USE_HARD_LINKS: false
+          
+      - name: 检查构建结果
+        run: |
+          echo "检查dist目录"
+          if (Test-Path dist) {
+            dir dist -Recurse | Select-Object FullName
+          } else {
+            echo "dist目录不存在"
+          }
           
       - name: 上传 Windows 安装包
         uses: actions/upload-artifact@v4
@@ -57,12 +103,14 @@ jobs:
           name: windows-installer
           path: |
             dist/*.exe
+          if-no-files-found: warn
             
       - name: 上传 Windows 便携版
         uses: actions/upload-artifact@v4
         with:
           name: windows-portable
           path: dist/win-unpacked
+          if-no-files-found: warn
             
   release:
     name: 创建发布版本
