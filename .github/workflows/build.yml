@@ -57,109 +57,70 @@ jobs:
           npm config set electron_builder_binaries_mirror https://npmmirror.com/mirrors/electron-builder-binaries/
           npm ci
         
-      # 使用electron-forge生成独立exe
-      - name: 构建Windows应用 (生成独立EXE)
+      # 使用简化方式构建Windows应用
+      - name: 创建简化构建脚本
         run: |
-          # 创建forge配置
-          $forgeConfig = @"
-          module.exports = {
-            packagerConfig: {
-              name: '外卖账号管理系统',
-              executableName: '外卖账号管理系统',
-              icon: './public/icons/icon.ico',
-              asar: true,
-              win32metadata: {
-                CompanyName: '',
-                FileDescription: '外卖账号管理系统',
-                OriginalFilename: '外卖账号管理系统.exe',
-                ProductName: '外卖账号管理系统',
-                InternalName: '外卖账号管理系统'
-              }
-            },
-            makers: [
-              {
-                name: '@electron-forge/maker-squirrel',
-                config: {
-                  name: '外卖账号管理系统',
-                  setupIcon: './public/icons/icon.ico',
-                  iconUrl: 'file://./public/icons/icon.ico'
-                }
-              },
-              {
-                name: '@electron-forge/maker-zip',
-                platforms: ['win32']
-              }
-            ]
-          };
-          "@
-          
-          # 将配置写入文件
-          Set-Content -Path "forge.config.js" -Value $forgeConfig
-          
-          # 安装electron-forge和相关依赖
-          npm install --no-save @electron-forge/cli @electron-forge/maker-squirrel @electron-forge/maker-zip
-          
-          # 创建构建脚本
-          $buildScript = @"
+          $simpleScript = @'
           const { execSync } = require('child_process');
           const fs = require('fs');
           const path = require('path');
           
-          console.log('开始构建Windows应用...');
+          console.log('Starting Windows build...');
+          
+          // Create portable build
           try {
-            // 运行electron-forge make
-            execSync('npx electron-forge make --platform=win32 --arch=x64', { stdio: 'inherit' });
-            console.log('构建完成!');
+            console.log('Creating portable executable...');
             
-            // 列出输出目录
-            if (fs.existsSync('out')) {
-              console.log('输出目录内容:');
-              const listDir = (dir) => {
-                const files = fs.readdirSync(dir);
-                files.forEach(file => {
-                  const fullPath = path.join(dir, file);
-                  const stats = fs.statSync(fullPath);
-                  if (stats.isDirectory()) {
-                    console.log(\`目录: \${fullPath}\`);
-                    listDir(fullPath);
-                  } else {
-                    console.log(\`文件: \${fullPath} (\${(stats.size / 1024 / 1024).toFixed(2)} MB)\`);
-                  }
-                });
-              };
-              listDir('out');
-              
-              // 确保dist目录存在
-              if (!fs.existsSync('dist')) {
-                fs.mkdirSync('dist', { recursive: true });
+            // Ensure dist directory exists
+            if (!fs.existsSync('dist')) {
+              fs.mkdirSync('dist', { recursive: true });
+            }
+            
+            // Use electron-packager for simplicity
+            execSync('npx electron-packager . WaimaiAccountManager --platform=win32 --arch=x64 --out=dist --overwrite --executable-name=WaimaiAccountManager', { 
+              stdio: 'inherit',
+              env: {
+                ...process.env,
+                ELECTRON_MIRROR: 'https://npmmirror.com/mirrors/electron/'
               }
+            });
+            
+            console.log('Build completed successfully!');
+            
+            // List output files
+            if (fs.existsSync('dist')) {
+              console.log('Output directory contents:');
+              const files = fs.readdirSync('dist');
+              console.log(files);
               
-              // 复制安装程序到dist目录
-              const squirrelDir = path.join('out', 'make', 'squirrel.windows', 'x64');
-              if (fs.existsSync(squirrelDir)) {
-                const setupFiles = fs.readdirSync(squirrelDir).filter(file => file.endsWith('.exe'));
-                if (setupFiles.length > 0) {
-                  setupFiles.forEach(file => {
-                    const source = path.join(squirrelDir, file);
-                    const dest = path.join('dist', file);
-                    fs.copyFileSync(source, dest);
-                    console.log(\`已复制安装程序: \${dest}\`);
-                  });
-                }
+              // Find the app directory
+              const appDir = files.find(f => fs.statSync(path.join('dist', f)).isDirectory());
+              if (appDir) {
+                console.log(`App directory: ${appDir}`);
+                
+                // Create a simple batch file to launch the app
+                const batchContent = `@echo off\r\nstart "" "%~dp0${appDir}\\WaimaiAccountManager.exe"\r\n`;
+                fs.writeFileSync('dist/启动外卖账号管理系统.bat', batchContent);
+                
+                // Create a simple readme
+                fs.writeFileSync('dist/README.txt', 'Double-click the batch file to start the application.\r\n');
               }
             }
           } catch (error) {
-            console.error('构建失败:', error);
+            console.error('Build failed:', error);
             process.exit(1);
           }
-          "@
+          '@
           
           # 将脚本写入文件
-          Set-Content -Path "build-exe.js" -Value $buildScript -Encoding UTF8
-          
-          # 运行构建脚本
-          node build-exe.js
-          
+          Set-Content -Path "simple-build.js" -Value $simpleScript -Encoding UTF8
+      
+      - name: 安装electron-packager
+        run: npm install --no-save electron-packager
+      
+      - name: 运行简化构建脚本
+        run: node simple-build.js
+      
       - name: 检查构建结果
         run: |
           echo "检查dist目录"
@@ -168,13 +129,26 @@ jobs:
           } else {
             echo "dist目录不存在"
           }
+      
+      - name: 创建ZIP压缩包
+        run: |
+          $appDir = Get-ChildItem -Path "dist" -Directory | Select-Object -First 1
+          if ($appDir) {
+            echo "Creating ZIP archive from: $($appDir.FullName)"
+            Compress-Archive -Path "dist\*" -DestinationPath "dist\WaimaiAccountManager-win-x64.zip" -Force
+            echo "ZIP archive created"
+          } else {
+            echo "No application directory found"
+            exit 1
+          }
           
-      - name: 上传 Windows 安装程序
+      - name: 上传Windows应用
         uses: actions/upload-artifact@v4
         with:
-          name: windows-installer
+          name: windows-app
           path: |
-            dist/*.exe
+            dist/*.zip
+            dist/*.bat
           if-no-files-found: warn
             
   release:
@@ -207,6 +181,7 @@ jobs:
           draft: false
           prerelease: false
           files: |
-            dist/**/*.exe
+            dist/**/*.zip
+            dist/**/*.bat
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
