@@ -1,4 +1,4 @@
-name: 构建应用
+name: 构建Windows应用
 
 on:
   push:
@@ -15,12 +15,8 @@ on:
 
 jobs:
   build:
-    name: 构建 ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, macos-latest]
+    name: 构建Windows
+    runs-on: windows-latest
 
     steps:
       - name: 检出代码
@@ -32,24 +28,14 @@ jobs:
           node-version: 16
           cache: 'npm'
 
-      # 配置Electron镜像
-      - name: 配置Electron镜像
-        run: |
-          echo "ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/" >> $GITHUB_ENV
-          echo "ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/" >> $GITHUB_ENV
-        shell: bash
-
       # 缓存Electron
       - name: 缓存Electron
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cache/electron
-            ~/.cache/electron-builder
-            ~/AppData/Local/electron/Cache
-            ~/AppData/Local/electron-builder/Cache
-            ~/.electron
-            ${{ runner.temp }}/.electron-builder
+            ~\AppData\Local\electron\Cache
+            ~\AppData\Local\electron-builder\Cache
+            ${{ runner.temp }}\.electron-builder
           key: ${{ runner.os }}-electron-cache-${{ hashFiles('**/package.json') }}
           restore-keys: |
             ${{ runner.os }}-electron-cache-
@@ -58,17 +44,14 @@ jobs:
         run: |
           npm config set registry https://registry.npmmirror.com/
           npm ci
-        env:
-          ELECTRON_SKIP_BINARY_DOWNLOAD: 1
-          
-      - name: 构建应用
-        run: npm run build
+        
+      - name: 构建Windows应用
+        run: npm run build:win
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           USE_HARD_LINKS: false
           
       - name: 上传 Windows 安装包
-        if: matrix.os == 'windows-latest'
         uses: actions/upload-artifact@v4
         with:
           name: windows-installer
@@ -76,19 +59,10 @@ jobs:
             dist/*.exe
             
       - name: 上传 Windows 便携版
-        if: matrix.os == 'windows-latest'
         uses: actions/upload-artifact@v4
         with:
           name: windows-portable
           path: dist/win-unpacked
-          
-      - name: 上传 macOS DMG
-        if: matrix.os == 'macos-latest'
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-dmg
-          path: |
-            dist/*.dmg
             
   release:
     name: 创建发布版本
@@ -121,7 +95,6 @@ jobs:
           prerelease: false
           files: |
             dist/**/*.exe
-            dist/**/*.dmg
             dist/**/*.zip
           body_path: releases/v${{ steps.get_version.outputs.VERSION }}-release-notes.md
         env:
