@@ -57,70 +57,26 @@ jobs:
           npm config set electron_builder_binaries_mirror https://npmmirror.com/mirrors/electron-builder-binaries/
           npm ci
         
-      # 使用简化方式构建Windows应用
-      - name: 创建简化构建脚本
-        run: |
-          $simpleScript = @'
-          const { execSync } = require('child_process');
-          const fs = require('fs');
-          const path = require('path');
-          
-          console.log('Starting Windows build...');
-          
-          // Create portable build
-          try {
-            console.log('Creating portable executable...');
-            
-            // Ensure dist directory exists
-            if (!fs.existsSync('dist')) {
-              fs.mkdirSync('dist', { recursive: true });
-            }
-            
-            // Use electron-packager for simplicity
-            execSync('npx electron-packager . WaimaiAccountManager --platform=win32 --arch=x64 --out=dist --overwrite --executable-name=WaimaiAccountManager', { 
-              stdio: 'inherit',
-              env: {
-                ...process.env,
-                ELECTRON_MIRROR: 'https://npmmirror.com/mirrors/electron/'
-              }
-            });
-            
-            console.log('Build completed successfully!');
-            
-            // List output files
-            if (fs.existsSync('dist')) {
-              console.log('Output directory contents:');
-              const files = fs.readdirSync('dist');
-              console.log(files);
-              
-              // Find the app directory
-              const appDir = files.find(f => fs.statSync(path.join('dist', f)).isDirectory());
-              if (appDir) {
-                console.log(`App directory: ${appDir}`);
-                
-                // Create a simple batch file to launch the app
-                const batchContent = `@echo off\r\nstart "" "%~dp0${appDir}\\WaimaiAccountManager.exe"\r\n`;
-                fs.writeFileSync('dist/启动外卖账号管理系统.bat', batchContent);
-                
-                // Create a simple readme
-                fs.writeFileSync('dist/README.txt', 'Double-click the batch file to start the application.\r\n');
-              }
-            }
-          } catch (error) {
-            console.error('Build failed:', error);
-            process.exit(1);
-          }
-          '@
-          
-          # 将脚本写入文件
-          Set-Content -Path "simple-build.js" -Value $simpleScript -Encoding UTF8
-      
+      # 使用electron-packager直接生成独立exe
       - name: 安装electron-packager
         run: npm install --no-save electron-packager
-      
-      - name: 运行简化构建脚本
-        run: node simple-build.js
-      
+          
+      - name: 构建Windows应用 (生成独立EXE)
+        run: |
+          # 直接使用electron-packager打包应用
+          npx electron-packager . "外卖账号管理系统" --platform=win32 --arch=x64 --out=dist --icon=public/icons/icon.ico --overwrite --executable-name="外卖账号管理系统" --app-copyright="Copyright © 2024" --app-version="1.0.0" --win32metadata.ProductName="外卖账号管理系统" --win32metadata.FileDescription="外卖账号管理系统" --asar
+          
+          # 显示生成的文件
+          dir dist -Recurse
+          
+          # 创建便携版ZIP包
+          $appDir = Get-ChildItem -Path "dist" -Directory | Select-Object -First 1
+          if ($appDir) {
+            echo "应用目录: $($appDir.FullName)"
+            Compress-Archive -Path "$($appDir.FullName)\*" -DestinationPath "dist\外卖账号管理系统-便携版.zip" -Force
+            echo "已创建便携版ZIP包"
+          }
+          
       - name: 检查构建结果
         run: |
           echo "检查dist目录"
@@ -129,26 +85,21 @@ jobs:
           } else {
             echo "dist目录不存在"
           }
-      
-      - name: 创建ZIP压缩包
-        run: |
-          $appDir = Get-ChildItem -Path "dist" -Directory | Select-Object -First 1
-          if ($appDir) {
-            echo "Creating ZIP archive from: $($appDir.FullName)"
-            Compress-Archive -Path "dist\*" -DestinationPath "dist\WaimaiAccountManager-win-x64.zip" -Force
-            echo "ZIP archive created"
-          } else {
-            echo "No application directory found"
-            exit 1
-          }
           
       - name: 上传Windows应用
         uses: actions/upload-artifact@v4
         with:
           name: windows-app
           path: |
+            dist/**/外卖账号管理系统.exe
+          if-no-files-found: warn
+            
+      - name: 上传便携版ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-portable
+          path: |
             dist/*.zip
-            dist/*.bat
           if-no-files-found: warn
             
   release:
@@ -181,7 +132,7 @@ jobs:
           draft: false
           prerelease: false
           files: |
+            dist/**/*.exe
             dist/**/*.zip
-            dist/**/*.bat
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
