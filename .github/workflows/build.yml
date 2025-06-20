@@ -24,10 +24,10 @@ jobs:
 
     steps:
       - name: 检出代码
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: 设置 Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: 16
           cache: 'npm'
@@ -41,7 +41,7 @@ jobs:
 
       # 缓存Electron
       - name: 缓存Electron
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cache/electron
@@ -69,7 +69,7 @@ jobs:
           
       - name: 上传 Windows 安装包
         if: matrix.os == 'windows-latest'
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: windows-installer
           path: |
@@ -77,14 +77,14 @@ jobs:
             
       - name: 上传 Windows 便携版
         if: matrix.os == 'windows-latest'
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: windows-portable
           path: dist/win-unpacked
           
       - name: 上传 macOS DMG
         if: matrix.os == 'macos-latest'
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: macos-dmg
           path: |
@@ -98,14 +98,14 @@ jobs:
     
     steps:
       - name: 检出代码
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         
       - name: 获取版本号
         id: get_version
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
         
       - name: 下载构建产物
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           path: dist
           
