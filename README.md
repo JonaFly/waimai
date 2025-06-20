@@ -1,100 +1,100 @@
 # 外卖账号管理系统
 
-![版本](https://img.shields.io/badge/版本-1.0.0-blue)
-![许可](https://img.shields.io/badge/许可-MIT-green)
+![构建状态](https://github.com/yourusername/waimai/workflows/构建应用/badge.svg)
+![版本](https://img.shields.io/github/v/release/yourusername/waimai)
+![许可证](https://img.shields.io/github/license/yourusername/waimai)
 
-外卖账号管理系统是一个基于Electron的桌面应用，专为需要管理多个外卖平台账号的商户设计。系统支持多平台账号管理、状态监控和自动化操作，帮助商户提高运营效率。
+多平台外卖账号管理工具，支持美团外卖、饿了么、京东到家等平台账号的统一管理和自动会话维护。
 
-## 核心功能
+## 功能特点
 
-- **多平台支持**: 美团外卖、饿了么、京东外卖等主流外卖平台
-- **账号管理**: 添加、编辑、删除和查看账号信息
-- **状态监控**: 实时监控账号登录状态和有效期
-- **自动化操作**: (即将推出) 商品管理、价格调整、订单处理等自动化功能
+- **多平台账号管理**：统一管理多个外卖平台的商家账号
+- **账号安全存储**：使用AES-256加密算法本地安全存储账号信息
+- **独立浏览器窗口**：每个账号使用独立的浏览器窗口登录
+- **自动会话维护**：定期自动刷新会话状态，保持账号长期在线
+- **状态监控**：实时监控账号登录状态和会话有效性
 
-## 快速开始
+## 安装方法
 
-### 安装
+### Windows用户
 
-```bash
-# 克隆仓库
-git clone https://github.com/yourusername/waimai.git
+1. 从[最新发布版本](https://github.com/yourusername/waimai/releases/latest)下载`外卖账号管理系统-1.0.0-x64.exe`安装包
+2. 双击安装包，按照向导完成安装
+3. 从开始菜单或桌面快捷方式启动应用
 
-# 进入项目目录
-cd waimai
+### macOS用户
 
-# 安装依赖
-npm install
+1. 从[最新发布版本](https://github.com/yourusername/waimai/releases/latest)下载`外卖账号管理系统-1.0.0-arm64.dmg`(Apple Silicon)或`外卖账号管理系统-1.0.0.dmg`(Intel)
+2. 打开DMG文件并将应用拖到Applications文件夹
+3. 从启动台或Applications文件夹启动应用
 
-# 启动应用
-npm start
-```
+### 便携版
 
-### 使用方法
-
-1. 点击"添加账号"按钮添加平台账号
-2. 输入账号信息并保存
-3. 点击"登录"按钮登录到相应平台
-4. 使用"刷新"按钮更新账号状态
+1. 从[最新发布版本](https://github.com/yourusername/waimai/releases/latest)下载`外卖账号管理系统-1.0.0.zip`
+2. 解压到任意位置
+3. 安装Electron: `npm install -g electron`
+4. 运行start.bat(Windows)或start.sh(macOS/Linux)
 
 ## 开发指南
 
-### 技术栈
+### 环境要求
 
-- **框架**: Electron
-- **前端**: HTML, CSS, JavaScript
-- **数据存储**: 本地加密存储
-- **网页自动化**: Electron内置浏览器功能
+- Node.js 14+
+- npm 或 yarn
 
-### 项目结构
+### 安装依赖
 
-```
-waimai/
-├── src/                # 源代码
-│   ├── main/           # 主进程代码
-│   └── renderer/       # 渲染进程代码
-├── public/             # 静态资源
-│   ├── css/            # 样式文件
-│   ├── js/             # 渲染进程JavaScript
-│   └── index.html      # 主页面
-├── scripts/            # 脚本工具
-├── releases/           # 版本发布说明
-└── RPA-ROADMAP.md      # RPA功能开发路线图
+```bash
+# 使用npm
+npm install
+
+# 或使用yarn
+yarn
 ```
 
-### 版本控制
+### 本地运行
 
-项目使用语义化版本控制：`主版本.次版本.修订版本`
+```bash
+npm start
+# 或
+yarn start
+```
 
-- **主版本**: 不兼容的API修改
-- **次版本**: 向后兼容的功能新增
-- **修订版本**: 向后兼容的问题修复
+### 构建应用
 
-查看[版本发布说明](./releases)了解各版本详情。
+```bash
+# 使用npm
+npm run build
 
-## 路线图
+# 或使用yarn
+yarn build
 
-项目计划分阶段实现以下功能：
+# 构建特定平台
+npm run build:win  # Windows
+npm run build:mac  # macOS
+npm run build:linux  # Linux
+```
 
-- [x] **v1.0.0**: 基础账号管理功能
-- [ ] **v1.1.0**: 会话管理增强
-- [ ] **v2.0.0**: RPA基础框架
-- [ ] **v2.1.0**: 商品管理自动化
-- [ ] **v3.0.0**: 高级自动化功能
+## 自动构建
 
-详细的开发计划请查看[RPA功能开发路线图](./RPA-ROADMAP.md)。
+本项目使用GitHub Actions自动构建Windows和macOS版本。每次推送到main分支或创建新标签时，都会触发自动构建流程。
 
-## 贡献指南
+### 手动触发构建
 
-1. Fork项目
-2. 创建功能分支 (`git checkout -b feature/amazing-feature`)
-3. 提交更改 (`git commit -m 'Add some amazing feature'`)
-4. 推送分支 (`git push origin feature/amazing-feature`)
-5. 打开Pull Request
+1. 在GitHub仓库页面，点击"Actions"选项卡
+2. 选择"构建应用"工作流
+3. 点击"Run workflow"按钮
+4. 可以选择指定版本号，然后点击"Run workflow"
+
+### 发布新版本
+
+1. 创建新的版本标签：`git tag v1.0.1`
+2. 推送标签到GitHub：`git push origin v1.0.1`
+3. GitHub Actions将自动构建并创建新的发布版本
 
 ## 许可证
 
-本项目采用MIT许可证 - 详见[LICENSE](./LICENSE)文件
+MIT
 
 ## 联系方式
 
