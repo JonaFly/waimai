@@ -16,6 +16,19 @@ class AccountManager {
     this.encryptionKey = encryptionKey;
     this.accounts = [];
     this.dataPath = path.join(app.getPath('userData'), 'accounts.json');
+    
+    // 添加profiles目录路径
+    this.profilesDir = path.join(app.getPath('userData'), 'profiles');
+    
+    // 确保profiles目录存在
+    if (!fs.existsSync(this.profilesDir)) {
+      try {
+        fs.mkdirSync(this.profilesDir, { recursive: true });
+      } catch (err) {
+        console.error('创建profiles目录失败:', err);
+      }
+    }
+    
     this.platformConfigs = {
       'meituan': {
         name: '美团外卖',
@@ -94,12 +107,12 @@ class AccountManager {
           return true;
         }
         
-        // 或者即将过期的在线账号（超过12小时未登录）
+        // 或者即将过期的在线账号（超过4小时未登录）
         if (account.status === 'online' && account.lastLoginTime) {
           const lastLogin = new Date(account.lastLoginTime);
           const now = new Date();
           const hoursSinceLogin = (now - lastLogin) / (1000 * 60 * 60);
-          return hoursSinceLogin > 12; // 超过12小时自动刷新
+          return hoursSinceLogin > 4; // 超过4小时自动刷新
         }
         
         return false;
@@ -107,22 +120,102 @@ class AccountManager {
       
       console.log(`找到 ${accountsToRefresh.length} 个账号需要刷新会话`);
       
-      // 依次处理每个账号
+      // 依次处理每个账号，增加重试机制
       for (const account of accountsToRefresh) {
-        try {
-          console.log(`尝试刷新账号会话: ${account.platform} - ${account.username}`);
-          await this.loginAccount(account.id, true); // 静默登录，无需前台显示
-          
-          // 等待一段时间再处理下一个账号，避免并发问题
-          await new Promise(resolve => setTimeout(resolve, 5000));
-        } catch (err) {
-          console.error(`刷新账号 ${account.username} 会话失败:`, err);
+        let retryCount = 0;
+        const maxRetries = 3; // 增加最大重试次数
+        let success = false;
+        
+        while (retryCount <= maxRetries && !success) {
+          try {
+            console.log(`尝试刷新账号会话 (尝试 ${retryCount + 1}/${maxRetries + 1}): ${account.platform} - ${account.username}`);
+            
+            // 登录前先检查是否已经有活跃窗口，如果有则关闭
+            if (this.windowManager) {
+              const sessionId = `${account.platform}-${account.username}`;
+              const sessions = this.windowManager.getAllWindows();
+              if (sessions.has(sessionId) && !sessions.get(sessionId).isDestroyed()) {
+                console.log(`关闭账号 ${account.username} 的现有窗口`);
+                try {
+                  sessions.get(sessionId).close();
+                  // 等待窗口完全关闭
+                  await new Promise(resolve => setTimeout(resolve, 2000));
+                } catch (err) {
+                  console.error('关闭窗口失败:', err);
+                }
+              }
+            }
+            
+            // 检查是否有保存的cookie和profile目录
+            const hasSavedProfile = account.profileDir && fs.existsSync(account.profileDir);
+            const hasSavedCookies = account.cookies && account.lastCookieSaveTime;
+            
+            // 如果有保存的cookie且不太旧，优先使用它们
+            if (hasSavedCookies && hasSavedProfile) {
+              const lastSaveTime = new Date(account.lastCookieSaveTime);
+              const now = new Date();
+              const hoursSinceSave = (now - lastSaveTime) / (1000 * 60 * 60);
+              
+              if (hoursSinceSave < 24) {
+                console.log(`使用保存的profile和cookie登录账号 ${account.username}`);
+              }
+            }
+            
+            // 使用静默模式登录账号
+            await this.loginAccount(account.id, true);
+            
+            // 等待登录完成
+            await new Promise(resolve => setTimeout(resolve, 5000));
+            
+            // 验证登录状态
+            await this.refreshAccountStatus(); // 刷新状态以获取最新信息
+            const updatedAccount = this.accounts.find(acc => acc.id === account.id);
+            
+            if (updatedAccount && updatedAccount.status === 'online') {
+              console.log(`账号 ${account.username} 会话刷新成功`);
+              success = true;
+              
+              // 记录成功的刷新时间
+              const index = this.accounts.findIndex(acc => acc.id === account.id);
+              if (index !== -1) {
+                this.accounts[index].lastRefreshTime = new Date().toISOString();
+                await this.saveAccounts();
+              }
+            } else {
+              throw new Error('登录后状态未变为在线');
+            }
+          } catch (err) {
+            retryCount++;
+            console.error(`刷新账号 ${account.username} 会话失败 (尝试 ${retryCount}/${maxRetries + 1}):`, err);
+            
+            if (retryCount <= maxRetries) {
+              // 增加重试间隔时间，避免过于频繁的请求
+              const waitTime = retryCount * 8000; // 8秒，16秒，24秒
+              console.log(`等待 ${waitTime/1000} 秒后重试...`);
+              await new Promise(resolve => setTimeout(resolve, waitTime));
+            }
+          }
         }
+        
+        // 即使成功也等待一段时间再处理下一个账号，避免并发问题
+        const waitBetweenAccounts = 10000; // 10秒
+        console.log(`等待 ${waitBetweenAccounts/1000} 秒后处理下一个账号...`);
+        await new Promise(resolve => setTimeout(resolve, waitBetweenAccounts));
       }
       
       console.log('会话维护完成');
+      
+      // 返回维护结果统计
+      return {
+        total: accountsToRefresh.length,
+        refreshed: accountsToRefresh.filter(acc => {
+          const account = this.accounts.find(a => a.id === acc.id);
+          return account && account.status === 'online';
+        }).length
+      };
     } catch (error) {
       console.error('执行会话维护失败:', error);
+      return { total: 0, refreshed: 0, error: error.message };
     }
   }
 
@@ -326,18 +419,30 @@ class AccountManager {
       // 创建唯一的会话ID
       const sessionId = `${account.platform}-${account.username}`;
       
-      // 使用window-manager创建新窗口并打开登录URL
+      // 创建账号专属的profile目录
+      const profileDir = path.join(this.profilesDir, sessionId);
+      if (!fs.existsSync(profileDir)) {
+        try {
+          fs.mkdirSync(profileDir, { recursive: true });
+          console.log(`为账号 ${account.username} 创建profile目录: ${profileDir}`);
+        } catch (err) {
+          console.error(`创建profile目录失败: ${err.message}`);
+        }
+      }
+      
+      // 使用window-manager创建新窗口并打开登录URL，指定使用账号专属的profile
       const win = this.windowManager.createWindow({
         id: sessionId,
         url: platformConfig.loginUrl,
         title: `${platformConfig.name} - ${account.username}`,
         width: silent ? 800 : 1200,
         height: silent ? 600 : 800,
-        show: !silent // 静默模式不显示窗口
+        show: !silent, // 静默模式不显示窗口
+        profileDir: profileDir // 添加profile目录参数
       });
       
-      // 如果是静默登录，注入自动填充脚本
-      if (silent && win) {
+      // 为所有窗口注入自动填充脚本，不只是静默模式
+      if (win) {
         win.webContents.on('did-finish-load', async () => {
           try {
             const url = win.webContents.getURL();
@@ -351,31 +456,229 @@ class AccountManager {
               await win.webContents.executeJavaScript(`
                 (function() {
                   try {
-                    // 查找用户名和密码输入框
-                    const usernameInput = document.querySelector('input[type="text"], input[name="username"], input[name="account"], input[name="mobile"]');
-                    const passwordInput = document.querySelector('input[type="password"], input[name="password"]');
-                    const loginButton = document.querySelector('button[type="submit"], button.login, input[type="submit"], .btn-login, .login-btn');
+                    console.log('正在尝试自动填充登录信息...');
+                    const currentPlatform = ${JSON.stringify(account.platform)};
                     
-                    if (usernameInput && passwordInput) {
-                      // 自动填充
-                      usernameInput.value = ${JSON.stringify(account.username)};
-                      passwordInput.value = ${JSON.stringify(account.password)};
-                      
-                      // 延迟点击登录按钮
-                      setTimeout(() => {
-                        if (loginButton) {
-                          loginButton.click();
-                          console.log('自动登录成功');
-                        } else {
-                          console.warn('未找到登录按钮');
+                    // 更全面的选择器，匹配更多可能的输入框
+                    const usernameSelectors = [
+                      'input[type="text"]', 
+                      'input[name="username"]', 
+                      'input[name="account"]', 
+                      'input[name="mobile"]',
+                      'input[placeholder*="账号"]',
+                      'input[placeholder*="用户名"]',
+                      'input[placeholder*="手机"]',
+                      'input.username',
+                      '#username',
+                      '#account',
+                      '#mobile'
+                    ];
+                    
+                    const passwordSelectors = [
+                      'input[type="password"]', 
+                      'input[name="password"]',
+                      'input[placeholder*="密码"]',
+                      'input.password',
+                      '#password'
+                    ];
+                    
+                    const buttonSelectors = [
+                      'button[type="submit"]', 
+                      'button.login', 
+                      'input[type="submit"]', 
+                      '.btn-login', 
+                      '.login-btn',
+                      'button:contains("登录")',
+                      'button[class*="login"]',
+                      'button[class*="submit"]',
+                      'a.login',
+                      'a[class*="login"]'
+                    ];
+
+                    // 特殊平台处理
+                    if (currentPlatform === 'meituan') {
+                      try {
+                        console.log('检测到美团平台，使用特殊处理流程');
+                        var username = account.username;
+                        var password = account.password;
+                        
+                        // 封装成函数，延迟执行
+                        function fillMeituanLoginForm(username, password) {
+                          try {
+                            // 查找表单元素
+                            var usernameInput = document.querySelector('input[placeholder*="账号"]') || 
+                                              document.querySelector('input[type="text"]') ||
+                                              document.querySelectorAll('input')[0];
+                            
+                            var passwordInput = document.querySelector('input[type="password"]') ||
+                                             document.querySelectorAll('input')[1];
+                            
+                            var checkbox = document.querySelector('input[type="checkbox"]');
+                            
+                            var loginButton = document.querySelector('button[class*="login"]');
+                            if (!loginButton) {
+                              var buttons = Array.from(document.querySelectorAll('button'));
+                              for (var i = 0; i < buttons.length; i++) {
+                                if (buttons[i].textContent && buttons[i].textContent.includes('登录')) {
+                                  loginButton = buttons[i];
+                                  break;
+                                }
+                              }
+                            }
+                            
+                            console.log('美团登录元素检测完成');
+                            
+                            if (usernameInput && passwordInput) {
+                              // 填充用户名和密码
+                              usernameInput.value = username;
+                              usernameInput.dispatchEvent(new Event('input', { bubbles: true }));
+                              usernameInput.dispatchEvent(new Event('change', { bubbles: true }));
+                              
+                              passwordInput.value = password;
+                              passwordInput.dispatchEvent(new Event('input', { bubbles: true }));
+                              passwordInput.dispatchEvent(new Event('change', { bubbles: true }));
+                              
+                              // 勾选复选框
+                              if (checkbox && !checkbox.checked) {
+                                checkbox.click();
+                              }
+                              
+                              // 点击登录按钮
+                              setTimeout(function() {
+                                if (loginButton) {
+                                  loginButton.click();
+                                }
+                              }, 1000);
+                            }
+                          } catch (err) {
+                            console.error('美团登录自动填充失败:', err);
+                          }
                         }
-                      }, 1000);
-                      
-                      return true;
+                        
+                        // 延迟执行填充函数
+                        setTimeout(function() {
+                          fillMeituanLoginForm(username, password);
+                        }, 2000);
+                        
+                        return true;
+                      } catch (e) {
+                        console.error('美团登录处理失败:', e);
+                        return false;
+                      }
                     } else {
-                      console.warn('未找到登录表单元素');
-                      return false;
+                      // 标准登录处理流程
+                      // 尝试查找用户名输入框
+                      let usernameInput = null;
+                      for (const selector of usernameSelectors) {
+                        const input = document.querySelector(selector);
+                        if (input) {
+                          usernameInput = input;
+                          console.log('找到用户名输入框:', selector);
+                          break;
+                        }
+                      }
+                      
+                      // 尝试查找密码输入框
+                      let passwordInput = null;
+                      for (const selector of passwordSelectors) {
+                        const input = document.querySelector(selector);
+                        if (input) {
+                          passwordInput = input;
+                          console.log('找到密码输入框:', selector);
+                          break;
+                        }
+                      }
+                      
+                      // 尝试查找登录按钮
+                      let loginButton = null;
+                      for (const selector of buttonSelectors) {
+                        try {
+                          const button = document.querySelector(selector);
+                          if (button) {
+                            loginButton = button;
+                            console.log('找到登录按钮:', selector);
+                            break;
+                          }
+                        } catch (e) {
+                          // 某些选择器可能不被支持，忽略错误
+                        }
+                      }
+                      
+                      // 如果没有找到登录按钮，尝试查找包含"登录"文本的按钮
+                      if (!loginButton) {
+                        const buttons = Array.from(document.querySelectorAll('button, input[type="submit"], a.btn'));
+                        for (const btn of buttons) {
+                          if (btn.innerText && btn.innerText.includes('登录')) {
+                            loginButton = btn;
+                            console.log('通过文本内容找到登录按钮');
+                            break;
+                          }
+                        }
+                      }
+                      
+                      if (usernameInput && passwordInput) {
+                        // 清除现有值并聚焦
+                        usernameInput.value = '';
+                        usernameInput.focus();
+                        
+                        // 模拟用户输入
+                        const username = ${JSON.stringify(account.username)};
+                        for (let i = 0; i < username.length; i++) {
+                          usernameInput.value += username[i];
+                          // 触发输入事件
+                          const event = new Event('input', { bubbles: true });
+                          usernameInput.dispatchEvent(event);
+                        }
+                        
+                        // 对密码框执行相同操作
+                        passwordInput.value = '';
+                        passwordInput.focus();
+                        
+                        const password = ${JSON.stringify(account.password)};
+                        for (let i = 0; i < password.length; i++) {
+                          passwordInput.value += password[i];
+                          // 触发输入事件
+                          const event = new Event('input', { bubbles: true });
+                          passwordInput.dispatchEvent(event);
+                        }
+                        
+                        // 触发change事件
+                        usernameInput.dispatchEvent(new Event('change', { bubbles: true }));
+                        passwordInput.dispatchEvent(new Event('change', { bubbles: true }));
+                        
+                        console.log('已填充用户名和密码');
+                        
+                        // 检查是否有需要点击的复选框（同意协议等）
+                        const checkboxes = document.querySelectorAll('input[type="checkbox"]');
+                        checkboxes.forEach(checkbox => {
+                          if (!checkbox.checked && 
+                              (checkbox.id && checkbox.id.toLowerCase().includes('agreement') || 
+                               checkbox.name && checkbox.name.toLowerCase().includes('agreement') ||
+                               checkbox.closest('label') && checkbox.closest('label').textContent.includes('同意'))) {
+                            console.log('点击同意协议复选框');
+                            checkbox.click();
+                            checkbox.checked = true;
+                          }
+                        });
+                        
+                        // 延迟点击登录按钮
+                        setTimeout(() => {
+                          if (loginButton) {
+                            console.log('点击登录按钮');
+                            loginButton.click();
+                          } else {
+                            console.warn('未找到登录按钮');
+                          }
+                        }, 1500);
+                        
+                        return true;
+                      } else {
+                        console.warn('未找到登录表单元素');
+                        return false;
+                      }
                     }
+                    
+                    return false;
                   } catch (err) {
                     console.error('自动登录脚本执行出错:', err);
                     return false;
@@ -388,24 +691,101 @@ class AccountManager {
           }
         });
         
-        // 设置超时，一段时间后关闭静默窗口
-        setTimeout(() => {
-          if (!win.isDestroyed()) {
-            win.close();
+        // 监听导航完成事件，用于保存cookie
+        win.webContents.on('did-navigate', async () => {
+          try {
+            // 获取当前URL
+            const currentUrl = win.webContents.getURL();
+            
+            // 检查是否已经登录成功（在非登录页面）
+            if (!currentUrl.includes('login') && !currentUrl.includes('signin')) {
+              // 获取并保存cookie
+              await this.saveCookiesForAccount(account.id, win);
+            }
+          } catch (err) {
+            console.error('保存cookie失败:', err);
           }
-        }, 60000); // 1分钟后关闭
+        });
+        
+        // 只有在静默模式下才设置自动关闭
+        if (silent) {
+          // 设置超时，一段时间后关闭静默窗口
+          setTimeout(() => {
+            if (!win.isDestroyed()) {
+              win.close();
+            }
+          }, 60000); // 1分钟后关闭
+        }
       }
 
       // 更新登录时间
       const index = this.accounts.findIndex(acc => acc.id === accountId);
       this.accounts[index].lastLoginTime = new Date().toISOString();
       this.accounts[index].status = 'online';
+      
+      // 记录profile路径
+      this.accounts[index].profileDir = profileDir;
+      
       await this.saveAccounts();
 
       return true;
     } catch (error) {
       console.error('登录账号失败:', error);
       throw error;
+    }
+  }
+  
+  /**
+   * 为指定账号保存cookie
+   * @param {string} accountId - 账号ID
+   * @param {BrowserWindow} win - 浏览器窗口实例
+   * @returns {Promise<boolean>} 是否保存成功
+   */
+  async saveCookiesForAccount(accountId, win) {
+    try {
+      if (!win || win.isDestroyed()) {
+        throw new Error('窗口已关闭或不存在');
+      }
+      
+      // 获取当前窗口的所有cookie
+      const cookies = await win.webContents.session.cookies.get({});
+      
+      if (!cookies || cookies.length === 0) {
+        console.warn('没有找到可保存的cookie');
+        return false;
+      }
+      
+      // 查找账号
+      const index = this.accounts.findIndex(acc => acc.id === accountId);
+      if (index === -1) {
+        throw new Error(`未找到ID为 ${accountId} 的账号`);
+      }
+      
+      // 保存cookie到账号信息中
+      this.accounts[index].cookies = cookies;
+      this.accounts[index].lastCookieSaveTime = new Date().toISOString();
+      
+      // 保存cookie到本地文件
+      const account = this.accounts[index];
+      const cookieFilePath = path.join(
+        this.profilesDir, 
+        `${account.platform}-${account.username}`, 
+        'cookies.json'
+      );
+      
+      // 加密保存cookie
+      const encryptedCookies = this.encryptData(cookies);
+      fs.writeFileSync(cookieFilePath, encryptedCookies, 'utf8');
+      
+      console.log(`成功保存账号 ${account.username} 的cookie，共 ${cookies.length} 个`);
+      
+      // 保存更新后的账号信息
+      await this.saveAccounts();
+      
+      return true;
+    } catch (error) {
+      console.error('保存cookie失败:', error);
+      return false;
     }
   }
 
@@ -447,6 +827,12 @@ class AccountManager {
                 
                 this.accounts[i].status = isLoggedIn ? 'online' : 'offline';
                 this.accounts[i].lastCheckTime = new Date().toISOString();
+                
+                // 如果登录状态为在线，保存cookie
+                if (isLoggedIn) {
+                  await this.saveCookiesForAccount(account.id, win);
+                }
+                
                 continue;
               }
             }
@@ -455,7 +841,24 @@ class AccountManager {
           }
         }
         
-        // 无活跃窗口时，通过上次登录时间判断
+        // 无活跃窗口时，先检查是否有保存的cookie
+        if (account.cookies && account.lastCookieSaveTime) {
+          const lastSaveTime = new Date(account.lastCookieSaveTime);
+          const now = new Date();
+          const hoursSinceSave = (now - lastSaveTime) / (1000 * 60 * 60);
+          
+          // 如果cookie保存时间在24小时内，认为状态是离线但可恢复
+          if (hoursSinceSave < 24) {
+            this.accounts[i].status = 'offline';
+            console.log(`账号 ${account.username} 无活跃窗口但有有效cookie(保存于${hoursSinceSave.toFixed(2)}小时前)`);
+            continue;
+          } else {
+            console.log(`账号 ${account.username} 的cookie已过期(${hoursSinceSave.toFixed(2)}小时前)`);
+            // 继续检查登录时间
+          }
+        }
+        
+        // 通过上次登录时间判断
         if (account.lastLoginTime) {
           const lastLogin = new Date(account.lastLoginTime);
           const now = new Date();
@@ -478,6 +881,81 @@ class AccountManager {
     } catch (error) {
       console.error('刷新账号状态失败:', error);
       throw error;
+    }
+  }
+
+  /**
+   * 强制刷新指定账号的会话
+   * @param {string} accountId - 账号ID
+   * @returns {Promise<Object>} 刷新结果
+   */
+  async forceRefreshSession(accountId) {
+    try {
+      console.log(`开始强制刷新账号会话: ${accountId}`);
+      
+      // 查找账号
+      const account = this.accounts.find(acc => acc.id === accountId);
+      if (!account) {
+        throw new Error(`未找到ID为 ${accountId} 的账号`);
+      }
+      
+      // 登录前先检查是否已经有活跃窗口，如果有则关闭
+      if (this.windowManager) {
+        const sessionId = `${account.platform}-${account.username}`;
+        const sessions = this.windowManager.getAllWindows();
+        if (sessions.has(sessionId) && !sessions.get(sessionId).isDestroyed()) {
+          console.log(`关闭账号 ${account.username} 的现有窗口`);
+          try {
+            sessions.get(sessionId).close();
+            // 等待窗口完全关闭
+            await new Promise(resolve => setTimeout(resolve, 2000));
+          } catch (err) {
+            console.error('关闭窗口失败:', err);
+          }
+        }
+      }
+      
+      // 使用静默模式登录账号
+      await this.loginAccount(account.id, true);
+      
+      // 等待登录完成
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      
+      // 验证登录状态
+      await this.refreshAccountStatus();
+      const updatedAccount = this.accounts.find(acc => acc.id === account.id);
+      
+      if (updatedAccount && updatedAccount.status === 'online') {
+        console.log(`账号 ${account.username} 会话刷新成功`);
+        
+        // 记录成功的刷新时间
+        const index = this.accounts.findIndex(acc => acc.id === account.id);
+        if (index !== -1) {
+          this.accounts[index].lastRefreshTime = new Date().toISOString();
+          await this.saveAccounts();
+        }
+        
+        return {
+          success: true,
+          message: `账号 ${account.username} 会话刷新成功`,
+          account: {
+            id: updatedAccount.id,
+            username: updatedAccount.username,
+            platform: updatedAccount.platform,
+            status: updatedAccount.status,
+            lastLoginTime: updatedAccount.lastLoginTime
+          }
+        };
+      } else {
+        throw new Error('登录后状态未变为在线');
+      }
+    } catch (error) {
+      console.error('强制刷新账号会话失败:', error);
+      return {
+        success: false,
+        message: `刷新失败: ${error.message}`,
+        error: error.message
+      };
     }
   }
 

@@ -43,6 +43,8 @@ async function initApp() {
     // 创建主窗口
     createMainWindow();
     
+    // 暂时禁用系统托盘功能
+    /*
     try {
       // 创建系统托盘
       createTray();
@@ -51,6 +53,7 @@ async function initApp() {
       dialog.showErrorBox('系统托盘创建失败', 
         `无法创建系统托盘: ${trayError.message}\n\n应用可以正常使用，但系统托盘功能将不可用。`);
     }
+    */
     
     // 设置IPC通信
     setupIPC();
@@ -112,11 +115,12 @@ function createMainWindow() {
 function createTray() {
   try {
     // 创建托盘图标
-    const iconPath = path.resolve(__dirname, '../../public/default-icon.png');
+    const iconPath = path.resolve(__dirname, '../../public/app-icon.png');
     console.log('托盘图标路径:', iconPath);
     
     if (!fs.existsSync(iconPath)) {
-      throw new Error(`托盘图标文件不存在: ${iconPath}`);
+      console.error(`托盘图标文件不存在: ${iconPath}`);
+      return; // 图标不存在时直接返回，不创建托盘
     }
     
     tray = new Tray(iconPath);
@@ -139,7 +143,7 @@ function createTray() {
     });
   } catch (error) {
     console.error('创建系统托盘失败:', error);
-    dialog.showErrorBox('系统托盘创建失败', error.message);
+    // 不抛出错误，允许应用继续运行
   }
 }
 
@@ -317,6 +321,20 @@ function setupIPC() {
     } catch (error) {
       console.error('获取平台列表失败:', error);
       throw error;
+    }
+  });
+
+  // 添加强制刷新会话的IPC处理
+  ipcMain.handle('account:force-refresh', async (event, accountId) => {
+    try {
+      return await accountManager.forceRefreshSession(accountId);
+    } catch (error) {
+      console.error('强制刷新会话失败:', error);
+      return {
+        success: false,
+        message: error.message,
+        error: error.toString()
+      };
     }
   });
 }
