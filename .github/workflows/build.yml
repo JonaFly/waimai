@@ -1,138 +1,72 @@
-name: 构建Windows应用
+name: Build and Release
 
 on:
   push:
-    branches: [ main, master, feature/* ]
-    tags: [ 'v*' ]
+    branches:
+      - master
+      - main
+      - release/*
+    tags:
+      - 'v*'
   pull_request:
-    branches: [ main, master ]
+    branches:
+      - master
+      - main
   workflow_dispatch:
-    inputs:
-      version:
-        description: '版本号 (例如: 1.0.0)'
-        required: false
-        default: ''
 
 jobs:
   build:
-    name: 构建Windows
     runs-on: windows-latest
 
     steps:
-      - name: 检出代码
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+    - name: Checkout code
+      uses: actions/checkout@v3
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: 18
+        cache: 'npm'
+      
+    - name: Install dependencies
+      run: npm install
+      
+    - name: Build with electron-builder
+      run: npm run build:win
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+    - name: Check build results
+      run: |
+        dir dist
 
-      - name: 设置 Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 18
-          cache: 'npm'
+    - name: Upload Windows App
+      uses: actions/upload-artifact@v3
+      with:
+        name: windows-app
+        path: dist/外卖账号管理系统-*.exe
+        retention-days: 5
 
-      - name: 显示环境信息
-        run: |
-          node --version
-          npm --version
-          echo "OS: $env:OS"
-          echo "工作目录: $env:GITHUB_WORKSPACE"
-          dir
-          
-      - name: 确保图标目录存在
-        run: |
-          if (-not (Test-Path "public\icons")) {
-            New-Item -Path "public\icons" -ItemType Directory -Force
-          }
-          if (-not (Test-Path "public\icons\icon.ico")) {
-            Copy-Item "public\icon.png" -Destination "public\icons\icon.png" -Force
-            echo "创建空白图标文件"
-            New-Item -Path "public\icons\icon.ico" -ItemType File -Force
-          }
-          dir public\icons
+    - name: Upload Portable ZIP
+      uses: actions/upload-artifact@v3
+      with:
+        name: portable-win-x64
+        path: dist/外卖账号管理系统-*-portable.exe
+        retention-days: 5
 
-      - name: 安装依赖
-        run: |
-          npm config set registry https://registry.npmmirror.com/
-          npm config set electron_mirror https://npmmirror.com/mirrors/electron/
-          npm config set electron_builder_binaries_mirror https://npmmirror.com/mirrors/electron-builder-binaries/
-          npm ci
-        
-      # 使用electron-packager直接生成独立exe
-      - name: 安装electron-packager
-        run: npm install --no-save electron-packager
-          
-      - name: 构建Windows应用 (生成独立EXE)
-        run: |
-          # 直接使用electron-packager打包应用
-          npx electron-packager . "外卖账号管理系统" --platform=win32 --arch=x64 --out=dist --icon=public/icons/icon.ico --overwrite --executable-name="外卖账号管理系统" --app-copyright="Copyright © 2024" --app-version="1.0.0" --win32metadata.ProductName="外卖账号管理系统" --win32metadata.FileDescription="外卖账号管理系统" --asar
-          
-          # 显示生成的文件
-          dir dist -Recurse
-          
-          # 创建便携版ZIP包
-          $appDir = Get-ChildItem -Path "dist" -Directory | Select-Object -First 1
-          if ($appDir) {
-            echo "应用目录: $($appDir.FullName)"
-            Compress-Archive -Path "$($appDir.FullName)\*" -DestinationPath "dist\外卖账号管理系统-便携版.zip" -Force
-            echo "已创建便携版ZIP包"
-          }
-          
-      - name: 检查构建结果
-        run: |
-          echo "检查dist目录"
-          if (Test-Path dist) {
-            dir dist -Recurse | Select-Object FullName
-          } else {
-            echo "dist目录不存在"
-          }
-          
-      - name: 上传Windows应用
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-app
-          path: |
-            dist/**/外卖账号管理系统.exe
-          if-no-files-found: warn
-            
-      - name: 上传便携版ZIP
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-portable
-          path: |
-            dist/*.zip
-          if-no-files-found: warn
-            
   release:
-    name: 创建发布版本
+    if: startsWith(github.ref, 'refs/tags/')
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    
     steps:
-      - name: 检出代码
-        uses: actions/checkout@v4
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
         
-      - name: 获取版本号
-        id: get_version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-        
-      - name: 下载构建产物
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-          
-      - name: 显示结构
-        run: ls -R
-        working-directory: dist
-        
-      - name: 创建版本发布
+      - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          name: 外卖账号管理系统 v${{ steps.get_version.outputs.VERSION }}
-          draft: false
-          prerelease: false
           files: |
-            dist/**/*.exe
-            dist/**/*.zip
+            windows-app/*
+            portable-win-x64/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
