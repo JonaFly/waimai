@@ -39,18 +39,6 @@ jobs:
         echo "Working directory: $env:GITHUB_WORKSPACE"
         dir
         
-    - name: Ensure icon directory exists
-      run: |
-        if (-not (Test-Path "public\icons")) {
-          New-Item -Path "public\icons" -ItemType Directory -Force
-        }
-        if (-not (Test-Path "public\icons\icon.ico")) {
-          Copy-Item "public\icon.png" -Destination "public\icons\icon.png" -Force
-          echo "Creating empty icon file"
-          New-Item -Path "public\icons\icon.ico" -ItemType File -Force
-        }
-        dir public\icons
-
     - name: Install dependencies
       run: |
         npm config set registry https://registry.npmmirror.com/
@@ -76,8 +64,8 @@ jobs:
             fs.mkdirSync('dist', { recursive: true });
           }
           
-          // Use electron-packager for simplicity
-          execSync('npx electron-packager . WaimaiAccountManager --platform=win32 --arch=x64 --out=dist --overwrite --executable-name=WaimaiAccountManager --icon=public/icons/icon.ico --asar', { 
+          // Use electron-packager for simplicity - without icon parameter
+          execSync('npx electron-packager . WaimaiAccountManager --platform=win32 --arch=x64 --out=dist --overwrite --executable-name=WaimaiAccountManager --asar', { 
             stdio: 'inherit',
             env: {
               ...process.env,
