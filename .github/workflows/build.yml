@@ -6,6 +6,7 @@ on:
       - master
       - main
       - release/*
+      - feature/session-management
     tags:
       - 'v*'
   pull_request:
