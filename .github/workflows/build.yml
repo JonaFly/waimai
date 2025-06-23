@@ -1,11 +1,10 @@
-name: Build and Release
+name: Build Windows App
 
 on:
   push:
     branches:
       - master
       - main
-      - release/*
       - feature/session-management
     tags:
       - 'v*'
@@ -17,57 +16,157 @@ on:
 
 jobs:
   build:
+    name: Build Windows
     runs-on: windows-latest
-
+    
     steps:
     - name: Checkout code
-      uses: actions/checkout@v3
-      
-    - name: Setup Node.js
-      uses: actions/setup-node@v3
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
       with:
         node-version: 18
         cache: 'npm'
       
+    - name: Environment info
+      run: |
+        node --version
+        npm --version
+        echo "OS: $env:OS"
+        echo "Working directory: $env:GITHUB_WORKSPACE"
+        dir
+        
+    - name: Ensure icon directory exists
+      run: |
+        if (-not (Test-Path "public\icons")) {
+          New-Item -Path "public\icons" -ItemType Directory -Force
+        }
+        if (-not (Test-Path "public\icons\icon.ico")) {
+          Copy-Item "public\icon.png" -Destination "public\icons\icon.png" -Force
+          echo "Creating empty icon file"
+          New-Item -Path "public\icons\icon.ico" -ItemType File -Force
+        }
+        dir public\icons
+
     - name: Install dependencies
-      run: npm install
-      
-    - name: Build with electron-builder
-      run: npm run build:win
-      env:
-        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      
+      run: |
+        npm config set registry https://registry.npmmirror.com/
+        npm config set electron_mirror https://npmmirror.com/mirrors/electron/
+        npm config set electron_builder_binaries_mirror https://npmmirror.com/mirrors/electron-builder-binaries/
+        npm ci
+        
+    - name: Install electron-packager
+      run: npm install --no-save electron-packager
+        
+    - name: Create build script
+      run: |
+        $simpleScript = @'
+        const { execSync } = require('child_process');
+        const fs = require('fs');
+        const path = require('path');
+        
+        console.log('Starting Windows build...');
+        
+        try {
+          // Ensure dist directory exists
+          if (!fs.existsSync('dist')) {
+            fs.mkdirSync('dist', { recursive: true });
+          }
+          
+          // Use electron-packager for simplicity
+          execSync('npx electron-packager . WaimaiAccountManager --platform=win32 --arch=x64 --out=dist --overwrite --executable-name=WaimaiAccountManager --icon=public/icons/icon.ico --asar', { 
+            stdio: 'inherit',
+            env: {
+              ...process.env,
+              ELECTRON_MIRROR: 'https://npmmirror.com/mirrors/electron/'
+            }
+          });
+          
+          console.log('Build completed successfully!');
+          
+          // List output files
+          if (fs.existsSync('dist')) {
+            console.log('Output directory contents:');
+            const files = fs.readdirSync('dist');
+            console.log(files);
+            
+            // Find the app directory
+            const appDir = files.find(f => fs.statSync(path.join('dist', f)).isDirectory());
+            if (appDir) {
+              console.log(`App directory: ${appDir}`);
+              
+              // Create a simple batch file to launch the app
+              const batchContent = `@echo off\r\nstart "" "%~dp0${appDir}\\WaimaiAccountManager.exe"\r\n`;
+              fs.writeFileSync('dist/Start_WaimaiManager.bat', batchContent);
+              
+              // Create portable zip
+              console.log('Creating portable ZIP package...');
+              const zipPath = path.join('dist', 'WaimaiAccountManager-portable.zip');
+              execSync(`powershell Compress-Archive -Path "${path.join('dist', appDir, '*')}" -DestinationPath "${zipPath}" -Force`, { stdio: 'inherit' });
+              console.log(`Created portable package: ${zipPath}`);
+            }
+          }
+        } catch (error) {
+          console.error('Build failed:', error);
+          process.exit(1);
+        }
+        '@
+        
+        Set-Content -Path "simple-build.js" -Value $simpleScript -Encoding UTF8
+    
+    - name: Run build script
+      run: node simple-build.js
+    
     - name: Check build results
       run: |
-        dir dist
-
+        if (Test-Path dist) {
+          dir dist -Recurse | Select-Object FullName
+        } else {
+          echo "dist directory does not exist"
+        }
+        
     - name: Upload Windows App
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: windows-app
-        path: dist/外卖账号管理系统-*.exe
-        retention-days: 5
-
+        path: |
+          dist/**/WaimaiAccountManager.exe
+        if-no-files-found: warn
+        
     - name: Upload Portable ZIP
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: portable-win-x64
-        path: dist/外卖账号管理系统-*-portable.exe
-        retention-days: 5
+        path: |
+          dist/WaimaiAccountManager-portable.zip
+        if-no-files-found: warn
 
   release:
-    if: startsWith(github.ref, 'refs/tags/')
+    name: Create Release
     needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          
+      - name: List structure
+        run: ls -R
+        working-directory: dist
         
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
+          draft: false
+          prerelease: false
           files: |
-            windows-app/*
-            portable-win-x64/*
+            dist/**/*.exe
+            dist/**/*.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
