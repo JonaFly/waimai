@@ -22,10 +22,61 @@
       <div id="accounts" class="tab-pane active">
         <div class="section-header">
           <h2>账号列表</h2>
-          <button id="refresh-btn" class="btn btn-primary">刷新状态</button>
+          <div class="section-actions">
+            <div class="search-container">
+              <input type="text" id="search-input" placeholder="搜索用户名或昵称...">
+              <select id="filter-platform">
+                <option value="">全部平台</option>
+              </select>
+              <select id="filter-status">
+                <option value="">全部状态</option>
+                <option value="online">在线</option>
+                <option value="offline">离线</option>
+                <option value="expired">已过期</option>
+                <option value="unknown">未知</option>
+              </select>
+            </div>
+            <button id="refresh-btn" class="btn btn-primary">刷新状态</button>
+          </div>
         </div>
-        <div id="account-list" class="account-list">
-          <div class="loading">加载中...</div>
+        
+        <div class="account-stats">
+          <div class="stat-card">
+            <span class="stat-value" id="total-accounts">0</span>
+            <span class="stat-label">总账号</span>
+          </div>
+          <div class="stat-card online">
+            <span class="stat-value" id="online-accounts">0</span>
+            <span class="stat-label">在线</span>
+          </div>
+          <div class="stat-card offline">
+            <span class="stat-value" id="offline-accounts">0</span>
+            <span class="stat-label">离线</span>
+          </div>
+          <div class="stat-card expired">
+            <span class="stat-value" id="expired-accounts">0</span>
+            <span class="stat-label">已过期</span>
+          </div>
+        </div>
+        
+        <div class="account-table-container">
+          <table class="account-table">
+            <thead>
+              <tr>
+                <th>平台</th>
+                <th>用户名</th>
+                <th>昵称</th>
+                <th>状态</th>
+                <th>最后登录</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="account-list">
+              <tr>
+                <td colspan="6" class="loading">加载中...</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </div>
       
@@ -94,8 +145,31 @@
       </div>
     </div>
     
+    <!-- 确认删除模态框 -->
+    <div id="confirm-delete-modal" class="modal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2>确认删除</h2>
+          <button class="close-btn">&times;</button>
+        </div>
+        <div class="modal-body">
+          <p>确定要删除这个账号吗？此操作不可撤销。</p>
+        </div>
+        <div class="modal-footer">
+          <button id="confirm-delete-btn" class="btn btn-danger">删除</button>
+          <button class="btn btn-secondary close-btn">取消</button>
+        </div>
+      </div>
+    </div>
+    
+    <!-- 通知提示 -->
+    <div id="notification" class="notification">
+      <span id="notification-message"></span>
+      <button class="close-notification">&times;</button>
+    </div>
+    
     <footer>
-      <p>&copy; 2023 外卖平台账号管理器</p>
+      <p>&copy; 2024 外卖平台账号管理器</p>
     </footer>
   </div>
   

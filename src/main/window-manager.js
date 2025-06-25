@@ -1,5 +1,6 @@
-const { BrowserWindow } = require('electron');
+const { BrowserWindow, session } = require('electron');
 const path = require('path');
+const fs = require('fs');
 
 /**
  * 窗口管理器类
@@ -40,6 +41,7 @@ class WindowManager {
    * @param {string} options.id - 窗口ID
    * @param {string} options.url - 加载的URL
    * @param {string} options.title - 窗口标题
+   * @param {string} options.profileDir - 独立profile目录的路径
    * @returns {BrowserWindow} 浏览器窗口
    */
   createWindow(options) {
@@ -59,6 +61,19 @@ class WindowManager {
       return win;
     }
     
+    // 设置session分区，使用独立的profile
+    const partition = `persist:${options.id}`;
+    
+    // 如果提供了profile目录，设置session的userData路径
+    if (options.profileDir) {
+      console.log(`使用自定义profile目录: ${options.profileDir}`);
+      
+      // 确保目录存在
+      if (!fs.existsSync(options.profileDir)) {
+        fs.mkdirSync(options.profileDir, { recursive: true });
+      }
+    }
+    
     // 创建新窗口
     const win = new BrowserWindow({
       width: options.width || 1200,
@@ -67,7 +82,7 @@ class WindowManager {
       webPreferences: {
         nodeIntegration: false,
         contextIsolation: true,
-        partition: `persist:${options.id}`, // 使用持久化的session
+        partition: partition, // 使用持久化的session
         preload: path.join(__dirname, 'browser-preload.js')
       },
       icon: path.resolve(__dirname, '../../public/default-icon.png')
