@@ -1,6 +1,6 @@
 {
   "name": "waimai-account-manager",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "外卖账号管理系统 - 管理多个外卖平台商家账号",
   "main": "src/main/main.js",
   "scripts": {

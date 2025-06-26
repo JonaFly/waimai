@@ -91,6 +91,139 @@ class AccountManager {
   }
 
   /**
+   * 通过静默访问页面刷新会话
+   * @param {string} accountId - 账号ID
+   * @returns {Promise<boolean>} 是否刷新成功
+   */
+  async refreshSessionBySilentVisit(accountId) {
+    try {
+      const account = this.accounts.find(acc => acc.id === accountId);
+      if (!account) {
+        throw new Error(`未找到ID为 ${accountId} 的账号`);
+      }
+
+      // 获取平台配置
+      const platformConfig = this.platformConfigs[account.platform];
+      if (!platformConfig) {
+        throw new Error(`未知平台: ${account.platform}`);
+      }
+
+      if (!this.windowManager) {
+        throw new Error('窗口管理器未初始化');
+      }
+
+      // 创建唯一的会话ID
+      const sessionId = `${account.platform}-${account.username}`;
+      
+      // 确保profile目录存在
+      const profileDir = path.join(this.profilesDir, sessionId);
+      if (!fs.existsSync(profileDir)) {
+        try {
+          fs.mkdirSync(profileDir, { recursive: true });
+          console.log(`为账号 ${account.username} 创建profile目录: ${profileDir}`);
+        } catch (err) {
+          console.error(`创建profile目录失败: ${err.message}`);
+        }
+      }
+      
+      // 根据平台选择要访问的URL（首页或店铺列表页面）
+      let visitUrl;
+      switch(account.platform) {
+        case 'meituan':
+          visitUrl = 'https://waimai.meituan.com/business/v2/index';
+          break;
+        case 'jd':
+          visitUrl = 'https://daojia.jd.com/merchant';
+          break;
+        default:
+          visitUrl = platformConfig.homeUrl || platformConfig.loginUrl;
+      }
+      
+      console.log(`账号 ${account.username} 静默访问页面: ${visitUrl}`);
+      
+      // 使用window-manager创建新窗口并打开页面，使用账号专属的profile
+      const win = this.windowManager.createWindow({
+        id: sessionId,
+        url: visitUrl,
+        title: `${platformConfig.name} - ${account.username} (刷新会话)`,
+        width: 800,
+        height: 600,
+        show: false, // 静默模式不显示窗口
+        profileDir: profileDir // 使用账号专属的profile
+      });
+      
+      if (!win) {
+        throw new Error('创建窗口失败');
+      }
+      
+      // 等待页面加载完成
+      return new Promise((resolve, reject) => {
+        // 设置超时
+        const timeout = setTimeout(() => {
+          if (!win.isDestroyed()) {
+            win.close();
+          }
+          resolve(false);
+        }, 30000); // 30秒超时
+        
+        // 监听页面加载完成事件
+        win.webContents.on('did-finish-load', async () => {
+          try {
+            // 获取当前URL
+            const currentUrl = win.webContents.getURL();
+            console.log(`账号 ${account.username} 页面加载完成: ${currentUrl}`);
+            
+            // 检查是否重定向到了登录页面
+            if (currentUrl.includes('login') || currentUrl.includes('signin')) {
+              console.log(`账号 ${account.username} 被重定向到登录页面，会话可能已失效`);
+              if (!win.isDestroyed()) {
+                win.close();
+              }
+              clearTimeout(timeout);
+              resolve(false);
+              return;
+            }
+            
+            // 等待一段时间，确保页面完全加载和可能的异步操作完成
+            await new Promise(r => setTimeout(r, 5000));
+            
+            // 获取并保存cookie
+            const success = await this.saveCookiesForAccount(account.id, win);
+            
+            // 关闭窗口
+            if (!win.isDestroyed()) {
+              win.close();
+            }
+            
+            clearTimeout(timeout);
+            resolve(success);
+          } catch (err) {
+            console.error(`账号 ${account.username} 刷新会话失败:`, err);
+            if (!win.isDestroyed()) {
+              win.close();
+            }
+            clearTimeout(timeout);
+            resolve(false);
+          }
+        });
+        
+        // 监听加载失败事件
+        win.webContents.on('did-fail-load', (event, errorCode, errorDescription) => {
+          console.error(`账号 ${account.username} 页面加载失败: ${errorDescription} (${errorCode})`);
+          if (!win.isDestroyed()) {
+            win.close();
+          }
+          clearTimeout(timeout);
+          resolve(false);
+        });
+      });
+    } catch (error) {
+      console.error(`账号 ${accountId} 静默访问刷新会话失败:`, error);
+      return false;
+    }
+  }
+
+  /**
    * 维护账号会话
    * 尝试刷新需要维护的账号
    */
@@ -108,12 +241,14 @@ class AccountManager {
           return true;
         }
         
-        // 或者即将过期的在线账号（超过4小时未登录）
-        if (account.status === 'online' && account.lastLoginTime) {
-          const lastLogin = new Date(account.lastLoginTime);
+        // 检查cookie是否即将过期（超过48小时但小于72小时）
+        if (account.status === 'online' && account.lastCookieSaveTime) {
+          const lastCookieSave = new Date(account.lastCookieSaveTime);
           const now = new Date();
-          const hoursSinceLogin = (now - lastLogin) / (1000 * 60 * 60);
-          return hoursSinceLogin > 4; // 超过4小时自动刷新
+          const hoursSinceCookieSave = (now - lastCookieSave) / (1000 * 60 * 60);
+          
+          // 只有当cookie接近过期时（48小时以上）才刷新，避免破坏有效的登录状态
+          return hoursSinceCookieSave > 48;
         }
         
         return false;
@@ -124,7 +259,7 @@ class AccountManager {
       // 依次处理每个账号，增加重试机制
       for (const account of accountsToRefresh) {
         let retryCount = 0;
-        const maxRetries = 3; // 增加最大重试次数
+        const maxRetries = 2; // 最大重试次数
         let success = false;
         
         while (retryCount <= maxRetries && !success) {
@@ -151,47 +286,83 @@ class AccountManager {
             const hasSavedProfile = account.profileDir && fs.existsSync(account.profileDir);
             const hasSavedCookies = account.cookies && account.lastCookieSaveTime;
             
-            // 如果有保存的cookie且不太旧，优先使用它们
+            // 首先尝试静默访问页面刷新会话（适用于有效cookie的账号）
             if (hasSavedCookies && hasSavedProfile) {
-              const lastSaveTime = new Date(account.lastCookieSaveTime);
-              const now = new Date();
-              const hoursSinceSave = (now - lastSaveTime) / (1000 * 60 * 60);
+              console.log(`账号 ${account.username} 尝试通过静默访问页面刷新会话`);
+              success = await this.refreshSessionBySilentVisit(account.id);
               
-              if (hoursSinceSave < 24) {
-                console.log(`使用保存的profile和cookie登录账号 ${account.username}`);
+              if (success) {
+                console.log(`账号 ${account.username} 通过静默访问页面成功刷新会话`);
+                
+                // 记录成功的刷新时间
+                const index = this.accounts.findIndex(acc => acc.id === account.id);
+                if (index !== -1) {
+                  this.accounts[index].lastRefreshTime = new Date().toISOString();
+                  this.accounts[index].status = 'online';
+                  await this.saveAccounts();
+                }
+                
+                // 成功刷新，跳出重试循环
+                break;
+              } else {
+                console.log(`账号 ${account.username} 静默访问页面刷新失败，尝试重新登录`);
               }
             }
             
-            // 使用静默模式登录账号
-            await this.loginAccount(account.id, true);
-            
-            // 等待登录完成
-            await new Promise(resolve => setTimeout(resolve, 5000));
-            
-            // 验证登录状态
-            await this.refreshAccountStatus(); // 刷新状态以获取最新信息
-            const updatedAccount = this.accounts.find(acc => acc.id === account.id);
-            
-            if (updatedAccount && updatedAccount.status === 'online') {
-              console.log(`账号 ${account.username} 会话刷新成功`);
-              success = true;
+            // 如果静默访问失败或没有有效cookie，尝试重新登录
+            if (!success && account.status === 'offline') {
+              console.log(`账号 ${account.username} 尝试通过重新登录刷新会话`);
               
-              // 记录成功的刷新时间
-              const index = this.accounts.findIndex(acc => acc.id === account.id);
-              if (index !== -1) {
-                this.accounts[index].lastRefreshTime = new Date().toISOString();
-                await this.saveAccounts();
+              // 使用静默模式登录账号
+              await this.loginAccount(account.id, true);
+              
+              // 等待登录完成
+              await new Promise(resolve => setTimeout(resolve, 5000));
+              
+              // 验证登录状态
+              await this.refreshAccountStatus(); // 刷新状态以获取最新信息
+              const updatedAccount = this.accounts.find(acc => acc.id === account.id);
+              
+              if (updatedAccount && updatedAccount.status === 'online') {
+                console.log(`账号 ${account.username} 通过重新登录成功刷新会话`);
+                success = true;
+                
+                // 记录成功的刷新时间
+                const index = this.accounts.findIndex(acc => acc.id === account.id);
+                if (index !== -1) {
+                  this.accounts[index].lastRefreshTime = new Date().toISOString();
+                  await this.saveAccounts();
+                }
+              } else {
+                throw new Error('登录后状态未变为在线');
               }
-            } else {
-              throw new Error('登录后状态未变为在线');
             }
           } catch (err) {
             retryCount++;
             console.error(`刷新账号 ${account.username} 会话失败 (尝试 ${retryCount}/${maxRetries + 1}):`, err);
             
+            // 如果登录失败但有有效的cookie，不要破坏原有状态
+            if (account.cookies && account.lastCookieSaveTime) {
+              const lastSaveTime = new Date(account.lastCookieSaveTime);
+              const now = new Date();
+              const hoursSinceSave = (now - lastSaveTime) / (1000 * 60 * 60);
+              
+              if (hoursSinceSave < 48) {
+                console.log(`账号 ${account.username} 有较新的cookie (${hoursSinceSave.toFixed(2)}小时前)，保留现有状态`);
+                // 将状态设置回在线
+                const index = this.accounts.findIndex(acc => acc.id === account.id);
+                if (index !== -1) {
+                  this.accounts[index].status = 'online';
+                  await this.saveAccounts();
+                }
+                success = true; // 视为成功，不再重试
+                break;
+              }
+            }
+            
             if (retryCount <= maxRetries) {
               // 增加重试间隔时间，避免过于频繁的请求
-              const waitTime = retryCount * 8000; // 8秒，16秒，24秒
+              const waitTime = retryCount * 8000; // 8秒，16秒
               console.log(`等待 ${waitTime/1000} 秒后重试...`);
               await new Promise(resolve => setTimeout(resolve, waitTime));
             }
@@ -560,96 +731,167 @@ class AccountManager {
   }
 
   /**
-   * 刷新账号状态
+   * 刷新所有账号状态
    * @returns {Promise<Array>} 更新后的账号列表
    */
   async refreshAccountStatus() {
     try {
-      // 获取所有会话
-      const sessions = this.windowManager ? this.windowManager.getAllWindows() : new Map();
-      
-      // 为每个账号更新状态
-      for (let i = 0; i < this.accounts.length; i++) {
-        const account = this.accounts[i];
-        const sessionId = `${account.platform}-${account.username}`;
-        
-        // 检查是否有活跃的浏览器窗口
-        const hasActiveWindow = sessions.has(sessionId) && !sessions.get(sessionId).isDestroyed();
-        
-        if (hasActiveWindow) {
-          // 如果有活跃窗口，尝试检查登录状态
-          try {
-            const win = sessions.get(sessionId);
-            // 获取平台配置
-            const platformConfig = this.platformConfigs[account.platform];
+      // 遍历所有账号
+      for (const account of this.accounts) {
+        try {
+          // 检查是否有活跃窗口
+          const sessionId = `${account.platform}-${account.username}`;
+          let isActive = false;
+          let hasValidCookie = false;
+          
+          // 检查是否有窗口管理器
+          if (this.windowManager) {
+            isActive = this.windowManager.hasWindow(sessionId);
             
-            if (platformConfig && platformConfig.checkUrl) {
-              // 检查当前URL是否在平台域内
-              const currentUrl = await win.webContents.getURL();
-              const isInPlatformDomain = currentUrl.includes(new URL(platformConfig.loginUrl).hostname);
-              
-              if (isInPlatformDomain) {
-                // 尝试判断是否已登录
-                const isLoggedIn = !currentUrl.includes('login') && 
-                                   (currentUrl.includes('/home') || 
-                                    currentUrl.includes('/index') || 
-                                    currentUrl.includes('/dashboard'));
-                
-                this.accounts[i].status = isLoggedIn ? 'online' : 'offline';
-                this.accounts[i].lastCheckTime = new Date().toISOString();
-                
-                // 如果登录状态为在线，保存cookie
-                if (isLoggedIn) {
-                  await this.saveCookiesForAccount(account.id, win);
-                }
-                
-                continue;
-              }
+            // 检查窗口管理器中的账号状态
+            const accountStatus = this.windowManager.getAccountStatus(account.username);
+            if (accountStatus && accountStatus.status === 'online' && 
+                accountStatus.lastUpdate && 
+                (Date.now() - accountStatus.lastUpdate) < 30 * 60 * 1000) { // 30分钟内的状态更新
+              console.log(`账号 ${account.username} 通过窗口管理器检测为在线状态`);
+              account.status = 'online';
+              account.lastStatusCheck = new Date().toISOString();
+              continue; // 跳过其他检查
             }
-          } catch (err) {
-            console.error('检查窗口状态出错:', err);
           }
-        }
-        
-        // 无活跃窗口时，先检查是否有保存的cookie
-        if (account.cookies && account.lastCookieSaveTime) {
-          const lastSaveTime = new Date(account.lastCookieSaveTime);
-          const now = new Date();
-          const hoursSinceSave = (now - lastSaveTime) / (1000 * 60 * 60);
           
-          // 如果cookie保存时间在24小时内，认为状态是离线但可恢复
-          if (hoursSinceSave < 24) {
-            this.accounts[i].status = 'offline';
-            console.log(`账号 ${account.username} 无活跃窗口但有有效cookie(保存于${hoursSinceSave.toFixed(2)}小时前)`);
-            continue;
-          } else {
-            console.log(`账号 ${account.username} 的cookie已过期(${hoursSinceSave.toFixed(2)}小时前)`);
-            // 继续检查登录时间
+          // 检查是否有保存的cookie
+          if (account.cookies && account.lastCookieSaveTime) {
+            const lastSaveTime = new Date(account.lastCookieSaveTime);
+            const now = new Date();
+            const hoursSinceSave = (now - lastSaveTime) / (1000 * 60 * 60);
+            
+            // 如果cookie保存时间在72小时内，认为是有效的
+            if (hoursSinceSave < 72) {
+              hasValidCookie = true;
+              console.log(`账号 ${account.username} 的cookie有效(保存于${hoursSinceSave.toFixed(2)}小时前)`);
+            } else {
+              console.log(`账号 ${account.username} 的cookie已过期(${hoursSinceSave.toFixed(2)}小时前)`);
+            }
           }
-        }
-        
-        // 通过上次登录时间判断
-        if (account.lastLoginTime) {
-          const lastLogin = new Date(account.lastLoginTime);
-          const now = new Date();
-          const hoursSinceLogin = (now - lastLogin) / (1000 * 60 * 60);
           
-          if (hoursSinceLogin < 24) {
-            this.accounts[i].status = 'online';
-          } else if (hoursSinceLogin < 72) {
-            this.accounts[i].status = 'offline';
+          // 更新账号状态
+          if (isActive) {
+            account.status = 'online';
+            account.lastStatusCheck = new Date().toISOString();
+            console.log(`账号 ${account.username} 有活跃窗口，状态设置为在线`);
+          } else if (hasValidCookie) {
+            account.status = 'online'; // 修改：有cookie就视为在线状态
+            account.lastStatusCheck = new Date().toISOString();
+            console.log(`账号 ${account.username} 无活跃窗口但有有效cookie，状态设置为在线`);
           } else {
-            this.accounts[i].status = 'expired';
+            account.status = 'offline';
+            account.lastStatusCheck = new Date().toISOString();
+            console.log(`账号 ${account.username} 无活跃窗口且无有效cookie，状态设置为离线`);
           }
-        } else {
-          this.accounts[i].status = 'unknown';
+        } catch (err) {
+          console.error(`刷新账号 ${account.username} 状态时出错:`, err);
+          account.status = 'error';
+          account.lastStatusCheck = new Date().toISOString();
         }
       }
       
+      // 保存更新后的账号列表
       await this.saveAccounts();
-      return this.getAccounts();
+      
+      return this.accounts;
     } catch (error) {
       console.error('刷新账号状态失败:', error);
+      throw error;
+    }
+  }
+  
+  /**
+   * 检查账号登录状态
+   * @param {string} accountId - 账号ID
+   * @returns {Promise<Object>} 登录状态信息
+   */
+  async checkLoginStatus(accountId) {
+    try {
+      // 查找账号
+      const account = this.accounts.find(acc => acc.id === accountId);
+      if (!account) {
+        throw new Error(`账号ID不存在: ${accountId}`);
+      }
+      
+      // 检查窗口管理器中的状态
+      if (this.windowManager) {
+        const accountStatus = this.windowManager.getAccountStatus(account.username);
+        if (accountStatus && accountStatus.status) {
+          return {
+            status: accountStatus.status,
+            lastUpdate: accountStatus.lastUpdate,
+            platform: account.platform
+          };
+        }
+      }
+      
+      // 如果没有窗口管理器状态，检查是否有活跃窗口
+      const sessionId = `${account.platform}-${account.username}`;
+      const isActive = this.windowManager && this.windowManager.hasWindow(sessionId);
+      
+      // 检查是否有保存的cookie
+      let hasValidCookie = false;
+      if (account.cookies && account.lastCookieSaveTime) {
+        const lastSaveTime = new Date(account.lastCookieSaveTime);
+        const now = new Date();
+        const hoursSinceSave = (now - lastSaveTime) / (1000 * 60 * 60);
+        
+        // 如果cookie保存时间在72小时内，认为是有效的
+        if (hoursSinceSave < 72) {
+          hasValidCookie = true;
+        }
+      }
+      
+      // 返回状态信息 - 修改这里：有有效cookie就设置为online
+      return {
+        status: isActive || hasValidCookie ? 'online' : 'unknown', // 修改：有cookie也视为在线
+        lastUpdate: Date.now(),
+        platform: account.platform
+      };
+    } catch (error) {
+      console.error(`检查账号 ${accountId} 登录状态失败:`, error);
+      return {
+        status: 'error',
+        lastUpdate: Date.now(),
+        error: error.message
+      };
+    }
+  }
+  
+  /**
+   * 更新账号登录状态
+   * @param {string} accountId - 账号ID
+   * @param {string} status - 状态（online/offline）
+   * @returns {Promise<Object>} 更新后的账号
+   */
+  async updateAccountStatus(accountId, status) {
+    try {
+      // 查找账号
+      const index = this.accounts.findIndex(acc => acc.id === accountId);
+      if (index === -1) {
+        throw new Error(`账号ID不存在: ${accountId}`);
+      }
+      
+      // 更新状态
+      this.accounts[index].status = status;
+      this.accounts[index].lastStatusCheck = new Date().toISOString();
+      
+      if (status === 'online') {
+        this.accounts[index].lastLoginTime = new Date().toISOString();
+      }
+      
+      // 保存更新后的账号列表
+      await this.saveAccounts();
+      
+      return this.accounts[index];
+    } catch (error) {
+      console.error(`更新账号 ${accountId} 状态失败:`, error);
       throw error;
     }
   }

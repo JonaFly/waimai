@@ -129,8 +129,8 @@ function createMeituanLoginScript(username, password) {
               const now = Date.now();
               const elapsed = now - window._formData.lastFill;
               
-              // 只在5秒内执行恢复操作
-              if (elapsed > 5000) {
+              // 只在10秒内执行恢复操作（延长时间）
+              if (elapsed > 10000) {
                 clearInterval(window._fillInterval);
                 console.log('停止监控输入值');
                 return;
@@ -604,6 +604,12 @@ function createMeituanLoginScript(username, password) {
       // 设置执行标记
       window.__meituanLoginExecuted = true;
       
+      // 立即检查当前是否已登录
+      if (checkLoginStatus()) {
+        console.log('检测到用户已登录，无需执行登录流程');
+        return;
+      }
+      
       // 使用XPath直接定位元素
       function getElementByXPath(xpath, doc) {
         return (doc || document).evaluate(xpath, doc || document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
@@ -659,15 +665,38 @@ function createMeituanLoginScript(username, password) {
                 console.log('已点击同意协议复选框');
               } else {
                 console.warn('未找到同意协议复选框');
+                // 尝试通过其他方式处理复选框
+                handleCheckbox();
               }
               
               // 点击登录按钮
               setTimeout(function() {
                 if (loginButton) {
+                  // 登录前设置持久化存储
+                  try {
+                    // 设置localStorage持久化标记
+                    localStorage.setItem('_mt_login_persistent', 'true');
+                    localStorage.setItem('_mt_login_username', ${safeUsername});
+                    localStorage.setItem('_mt_login_timestamp', Date.now());
+                    
+                    // 尝试设置cookie
+                    document.cookie = "remember_me=true; expires=" + new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toUTCString() + "; path=/";
+                    document.cookie = "keep_login=true; expires=" + new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toUTCString() + "; path=/";
+                    
+                    console.log('已设置持久化存储标记');
+                  } catch (e) {
+                    console.error('设置持久化存储失败:', e);
+                  }
+                  
                   loginButton.click();
                   console.log('已点击登录按钮');
+                  
+                  // 登录后监听页面变化，确保会话保持
+                  setupLoginSuccessMonitor();
                 } else {
                   console.error('未找到登录按钮');
+                  // 尝试通过其他方式点击登录按钮
+                  clickLoginButton();
                 }
               }, 500);
             } catch (e) {
@@ -678,6 +707,92 @@ function createMeituanLoginScript(username, password) {
           return true;
         } catch (e) {
           console.error('XPath执行出错:', e);
+          return false;
+        }
+      }
+      
+      // 设置登录成功后的监控
+      function setupLoginSuccessMonitor() {
+        // 创建MutationObserver监听DOM变化
+        const observer = new MutationObserver(function(mutations) {
+          // 检查是否已经登录成功
+          checkLoginStatus();
+        });
+        
+        // 开始观察文档变化
+        observer.observe(document, { 
+          childList: true, 
+          subtree: true,
+          attributes: true,
+          characterData: true
+        });
+        
+        // 5分钟后停止观察
+        setTimeout(function() {
+          observer.disconnect();
+        }, 300000);
+      }
+      
+      // 检查登录状态的新函数
+      function checkLoginStatus() {
+        console.log('检查登录状态...');
+        
+        // 检查是否存在"全部门店"元素
+        const allStoresElement = document.querySelector('.全部门店') || 
+                                 document.querySelector('*:contains("全部门店")') ||
+                                 Array.from(document.querySelectorAll('*')).find(el => 
+                                   el.textContent && el.textContent.includes('全部门店')
+                                 );
+        
+        // 检查其他后台特有元素
+        const otherElements = document.querySelector('.商家首页') || 
+                              document.querySelector('*:contains("商家首页")') ||
+                              document.querySelector('.订单管理') ||
+                              document.querySelector('*:contains("订单管理")') ||
+                              document.querySelector('.商品管理') ||
+                              document.querySelector('*:contains("商品管理")');
+        
+        if (allStoresElement || otherElements) {
+          console.log('检测到登录成功特征元素，用户已登录');
+          
+          try {
+            // 设置更多持久化存储
+            localStorage.setItem('_mt_login_status', 'logged_in');
+            sessionStorage.setItem('_mt_session_active', 'true');
+            
+            // 向父窗口发送登录成功消息
+            window.parent.postMessage({
+              type: 'LOGIN_STATUS',
+              status: 'success',
+              platform: 'meituan',
+              timestamp: Date.now()
+            }, '*');
+            
+            // 每30秒刷新一次会话状态
+            setInterval(function() {
+              try {
+                // 更新时间戳
+                localStorage.setItem('_mt_login_timestamp', Date.now());
+                console.log('已刷新会话状态');
+                
+                // 持续向父窗口发送登录状态
+                window.parent.postMessage({
+                  type: 'LOGIN_STATUS',
+                  status: 'active',
+                  platform: 'meituan',
+                  timestamp: Date.now()
+                }, '*');
+              } catch (e) {
+                console.error('刷新会话状态失败:', e);
+              }
+            }, 30000);
+            
+            return true;
+          } catch (e) {
+            console.error('设置登录成功后的持久化存储失败:', e);
+          }
+        } else {
+          console.log('未检测到登录成功特征元素，用户可能未登录');
           return false;
         }
       }
@@ -767,8 +882,30 @@ function createMeituanLoginScript(username, password) {
         success = tryInIframes();
       }
       
+      // 如果XPath方法都失败，尝试使用通用方法
+      if (!success) {
+        console.log('XPath方法失败，尝试使用通用方法');
+        fillCredentialsByAllMeans();
+        handleCheckbox();
+        setTimeout(clickLoginButton, 1000);
+      }
+      
       // 报告执行结果
-      console.log('XPath定位执行结果:', success ? '成功' : '失败');
+      console.log('登录执行结果:', success ? '成功' : '使用备用方法');
+      
+      // 设置页面卸载前的处理
+      window.addEventListener('beforeunload', function() {
+        // 保存会话状态到localStorage
+        try {
+          localStorage.setItem('_mt_session_state', JSON.stringify({
+            username: ${safeUsername},
+            timestamp: Date.now(),
+            isLoggedIn: true
+          }));
+        } catch (e) {
+          console.error('保存会话状态失败:', e);
+        }
+      });
       
       // 一分钟后重置执行标记
       setTimeout(function() {

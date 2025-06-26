@@ -337,6 +337,46 @@ function setupIPC() {
       };
     }
   });
+  
+  // 添加登录状态更新处理
+  ipcMain.on('login-status-update', (event, data) => {
+    if (data && data.username) {
+      console.log(`接收到账号 ${data.username} 的登录状态更新:`, data.status);
+      
+      // 更新窗口管理器中的账号状态
+      if (windowManager) {
+        windowManager.setAccountStatus(data.username, data.status, data.platform);
+      }
+      
+      // 通知主窗口更新账号状态
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('account-status-updated', {
+          username: data.username,
+          status: data.status,
+          platform: data.platform,
+          timestamp: data.timestamp || Date.now()
+        });
+      }
+    }
+  });
+  
+  // 添加从渲染进程获取账号状态的处理
+  ipcMain.handle('get-account-status', (event, username) => {
+    if (windowManager) {
+      return windowManager.getAccountStatus(username);
+    }
+    return { status: 'unknown', lastUpdate: 0 };
+  });
+  
+  // 添加从浏览器窗口接收消息的处理
+  ipcMain.on('browser-message', (event, message) => {
+    if (message && message.channel === 'login-status') {
+      // 转发登录状态消息
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('browser-status-message', message.data);
+      }
+    }
+  });
 }
 
 // 应用初始化完成后启动

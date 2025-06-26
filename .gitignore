@@ -42,3 +42,11 @@ yarn-error.log*
 .idea
 .vscode
 *.sw?
+
+# 应用程序数据
+profiles/
+cookies/
+
+# 临时文件
+tmp/
+temp/

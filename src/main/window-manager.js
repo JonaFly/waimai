@@ -1,4 +1,4 @@
-const { BrowserWindow, session } = require('electron');
+const { BrowserWindow, session, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -12,6 +12,72 @@ class WindowManager {
    */
   constructor() {
     this.windows = new Map();
+    this.accountStatus = new Map(); // 存储账号登录状态
+    
+    // 设置IPC监听器接收登录状态更新
+    this._setupIpcListeners();
+  }
+  
+  /**
+   * 设置IPC监听器
+   * @private
+   */
+  _setupIpcListeners() {
+    ipcMain.on('login-status-update', (event, data) => {
+      if (data && data.username) {
+        const isLoggedIn = data.status === 'success' || data.status === 'active';
+        this.accountStatus.set(data.username, {
+          status: isLoggedIn ? 'online' : 'offline',
+          lastUpdate: Date.now(),
+          platform: data.platform || 'unknown'
+        });
+        
+        console.log(`账号 ${data.username} 状态更新为: ${isLoggedIn ? '在线' : '离线'}`);
+        
+        // 通知所有窗口账号状态已更新
+        this.windows.forEach(win => {
+          if (!win.isDestroyed()) {
+            win.webContents.send('account-status-updated', {
+              username: data.username,
+              status: isLoggedIn ? 'online' : 'offline'
+            });
+          }
+        });
+      }
+    });
+  }
+  
+  /**
+   * 获取账号状态
+   * @param {string} username - 账号用户名
+   * @returns {Object} 账号状态信息
+   */
+  getAccountStatus(username) {
+    return this.accountStatus.get(username) || { status: 'unknown', lastUpdate: 0 };
+  }
+  
+  /**
+   * 设置账号状态
+   * @param {string} username - 账号用户名
+   * @param {string} status - 状态（online/offline）
+   * @param {string} platform - 平台
+   */
+  setAccountStatus(username, status, platform) {
+    this.accountStatus.set(username, {
+      status: status,
+      lastUpdate: Date.now(),
+      platform: platform || 'unknown'
+    });
+    
+    // 通知所有窗口账号状态已更新
+    this.windows.forEach(win => {
+      if (!win.isDestroyed()) {
+        win.webContents.send('account-status-updated', {
+          username: username,
+          status: status
+        });
+      }
+    });
   }
   
   /**
@@ -72,6 +138,27 @@ class WindowManager {
       if (!fs.existsSync(options.profileDir)) {
         fs.mkdirSync(options.profileDir, { recursive: true });
       }
+      
+      // 配置持久化session
+      const ses = session.fromPartition(partition, { cache: true });
+      
+      // 设置cookie的过期时间为最长
+      ses.cookies.set({
+        url: options.url,
+        name: 'session_persist',
+        value: 'true',
+        expirationDate: Math.floor(Date.now() / 1000) + (365 * 24 * 60 * 60), // 一年有效期
+        httpOnly: true,
+        secure: options.url.startsWith('https')
+      }).catch(err => console.error('设置持久化cookie失败:', err));
+      
+      // 禁用content-security-policy以允许跨域cookie
+      ses.webRequest.onHeadersReceived((details, callback) => {
+        if (details.responseHeaders && details.responseHeaders['Content-Security-Policy']) {
+          delete details.responseHeaders['Content-Security-Policy'];
+        }
+        callback({ cancel: false, responseHeaders: details.responseHeaders });
+      });
     }
     
     // 创建新窗口
@@ -83,10 +170,61 @@ class WindowManager {
         nodeIntegration: false,
         contextIsolation: true,
         partition: partition, // 使用持久化的session
-        preload: path.join(__dirname, 'browser-preload.js')
+        preload: path.join(__dirname, 'browser-preload.js'),
+        // 增加额外的webPreferences配置以提高持久化能力
+        persistentCookies: true,
+        cache: true
       },
       icon: path.resolve(__dirname, '../../public/default-icon.png')
     });
+    
+    // 设置窗口间通信
+    win.webContents.on('did-finish-load', () => {
+      // 添加消息监听器接收渲染进程的消息
+      win.webContents.on('ipc-message', (event, channel, ...args) => {
+        if (channel === 'login-status-update') {
+          const data = args[0];
+          if (data && data.username) {
+            this.setAccountStatus(data.username, data.status === 'success' ? 'online' : 'offline', data.platform);
+          }
+        }
+      });
+    });
+    
+    // 监听页面中的console.log消息，查找登录状态指示
+    win.webContents.on('console-message', (event, level, message) => {
+      // 检查消息中是否包含登录状态相关信息
+      if (message.includes('检测到登录成功特征元素') && options.id) {
+        // 从ID中提取用户名（假设ID格式为 platform-username）
+        const parts = options.id.split('-');
+        if (parts.length >= 2) {
+          const username = parts[1];
+          const platform = parts[0];
+          this.setAccountStatus(username, 'online', platform);
+        }
+      }
+    });
+    
+    // 配置session持久化选项
+    const ses = win.webContents.session;
+    
+    // 使用替代方法配置缓存和存储
+    try {
+      // 配置缓存大小和存储选项
+      ses.setCacheSize(1024 * 1024 * 100); // 设置100MB缓存
+    } catch (err) {
+      console.warn('设置缓存大小失败，可能是API不支持:', err.message);
+    }
+    
+    // 增加cookie持久化配置
+    ses.cookies.set({
+      url: options.url,
+      name: 'persistent_session',
+      value: 'true',
+      expirationDate: Math.floor(Date.now() / 1000) + (365 * 24 * 60 * 60), // 一年有效期
+      httpOnly: true,
+      secure: options.url.startsWith('https')
+    }).catch(err => console.error('设置持久化cookie失败:', err));
     
     // 加载URL
     win.loadURL(options.url);

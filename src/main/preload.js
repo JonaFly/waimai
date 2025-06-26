@@ -37,5 +37,27 @@ contextBridge.exposeInMainWorld("electronAPI", {
     return () => {
       ipcRenderer.removeAllListeners('show-account-details');
     };
-  }
+  },
+  
+  // 获取账号登录状态
+  getAccountStatus: (username) => ipcRenderer.invoke('get-account-status', username),
+  
+  // 接收账号状态更新通知
+  onAccountStatusUpdated: (callback) => {
+    ipcRenderer.on('account-status-updated', (_, data) => callback(data));
+    return () => {
+      ipcRenderer.removeAllListeners('account-status-updated');
+    };
+  },
+  
+  // 接收浏览器窗口状态消息
+  onBrowserStatusMessage: (callback) => {
+    ipcRenderer.on('browser-status-message', (_, data) => callback(data));
+    return () => {
+      ipcRenderer.removeAllListeners('browser-status-message');
+    };
+  },
+  
+  // 强制刷新账号会话
+  forceRefreshSession: (accountId) => ipcRenderer.invoke('account:force-refresh', accountId)
 });

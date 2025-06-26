@@ -1,4 +1,4 @@
-name: Build Windows App
+name: Build Multi-Platform App
 
 on:
   push:
@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  build-windows:
     name: Build Windows
     runs-on: windows-latest
     
@@ -92,7 +92,7 @@ jobs:
               
               // Create portable zip
               console.log('Creating portable ZIP package...');
-              const zipPath = path.join('dist', 'WaimaiAccountManager-portable.zip');
+              const zipPath = path.join('dist', 'WaimaiAccountManager-portable-win-x64.zip');
               execSync(`powershell Compress-Archive -Path "${path.join('dist', appDir, '*')}" -DestinationPath "${zipPath}" -Force`, { stdio: 'inherit' });
               console.log(`Created portable package: ${zipPath}`);
             }
@@ -129,12 +129,125 @@ jobs:
       with:
         name: portable-win-x64
         path: |
-          dist/WaimaiAccountManager-portable.zip
+          dist/WaimaiAccountManager-portable-win-x64.zip
+        if-no-files-found: warn
+
+  build-macos:
+    name: Build macOS
+    runs-on: macos-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: 18
+        cache: 'npm'
+      
+    - name: Environment info
+      run: |
+        node --version
+        npm --version
+        echo "OS: $(uname -s)"
+        echo "Working directory: $GITHUB_WORKSPACE"
+        ls -la
+        
+    - name: Install dependencies
+      run: |
+        npm config set registry https://registry.npmmirror.com/
+        npm config set electron_mirror https://npmmirror.com/mirrors/electron/
+        npm config set electron_builder_binaries_mirror https://npmmirror.com/mirrors/electron-builder-binaries/
+        npm ci
+        
+    - name: Install electron-packager
+      run: npm install --no-save electron-packager
+        
+    - name: Create build script
+      run: |
+        cat > simple-build-mac.js << 'EOL'
+        const { execSync } = require('child_process');
+        const fs = require('fs');
+        const path = require('path');
+        
+        console.log('Starting macOS build...');
+        
+        try {
+          // Ensure dist directory exists
+          if (!fs.existsSync('dist')) {
+            fs.mkdirSync('dist', { recursive: true });
+          }
+          
+          // Use electron-packager for macOS
+          execSync('npx electron-packager . "WaimaiAccountManager" --platform=darwin --arch=x64 --out=dist --overwrite --asar', { 
+            stdio: 'inherit',
+            env: {
+              ...process.env,
+              ELECTRON_MIRROR: 'https://npmmirror.com/mirrors/electron/'
+            }
+          });
+          
+          console.log('Build completed successfully!');
+          
+          // List output files
+          if (fs.existsSync('dist')) {
+            console.log('Output directory contents:');
+            const files = fs.readdirSync('dist');
+            console.log(files);
+            
+            // Find the app directory
+            const appDir = files.find(f => f.endsWith('.app') || fs.statSync(path.join('dist', f)).isDirectory());
+            if (appDir) {
+              console.log(`App directory: ${appDir}`);
+              
+              // Create portable zip
+              console.log('Creating portable ZIP package...');
+              const zipPath = path.join('dist', 'WaimaiAccountManager-portable-mac-x64.zip');
+              execSync(`cd dist && zip -r "${path.basename(zipPath)}" "${appDir}"`, { stdio: 'inherit' });
+              console.log(`Created portable package: ${zipPath}`);
+            }
+          }
+        } catch (error) {
+          console.error('Build failed:', error);
+          process.exit(1);
+        }
+        EOL
+        
+        chmod +x simple-build-mac.js
+    
+    - name: Run build script
+      run: node simple-build-mac.js
+    
+    - name: Check build results
+      run: |
+        if [ -d "dist" ]; then
+          find dist -type f | sort
+        else
+          echo "dist directory does not exist"
+        fi
+        
+    - name: Upload macOS App
+      uses: actions/upload-artifact@v4
+      with:
+        name: macos-app
+        path: |
+          dist/**/*.app
+        if-no-files-found: warn
+        
+    - name: Upload Portable ZIP
+      uses: actions/upload-artifact@v4
+      with:
+        name: portable-mac-x64
+        path: |
+          dist/WaimaiAccountManager-portable-mac-x64.zip
         if-no-files-found: warn
 
   release:
     name: Create Release
-    needs: build
+    needs: [build-windows, build-macos]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     
@@ -156,5 +269,6 @@ jobs:
           files: |
             dist/**/*.exe
             dist/**/*.zip
+            dist/**/*.app
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
