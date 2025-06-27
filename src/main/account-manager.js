@@ -3,17 +3,20 @@ const path = require('path');
 const crypto = require('crypto');
 const { app, shell } = require('electron');
 const loginScripts = require('./login-scripts');
+const EventEmitter = require('events');
 
 /**
  * 账号管理器类
  * 负责账号的添加、删除、编辑和登录
  */
-class AccountManager {
+class AccountManager extends EventEmitter {
   /**
    * 构造函数
    * @param {string} encryptionKey - 用于加密账号信息的密钥
    */
   constructor(encryptionKey) {
+    super(); // 初始化EventEmitter
+    
     this.encryptionKey = encryptionKey;
     this.accounts = [];
     this.dataPath = path.join(app.getPath('userData'), 'accounts.json');
@@ -50,6 +53,18 @@ class AccountManager {
     
     // 保存窗口管理器引用
     this.windowManager = null;
+    
+    // 会话维护定时器
+    this.sessionMaintenanceTimer = null;
+    
+    // 数据文件路径
+    this.dataDir = path.join(process.env.HOME || process.env.USERPROFILE, '.waimai-account-manager');
+    this.accountsFile = path.join(this.dataDir, 'accounts.json');
+    
+    // 确保数据目录存在
+    if (!fs.existsSync(this.dataDir)) {
+      fs.mkdirSync(this.dataDir, { recursive: true });
+    }
   }
   
   /**
@@ -65,9 +80,9 @@ class AccountManager {
 
   /**
    * 启动会话维护任务
-   * @param {number} interval - 检查间隔，默认4小时
+   * @param {number} interval - 维护间隔（毫秒），默认1小时
    */
-  startSessionMaintenance(interval = 4 * 60 * 60 * 1000) {
+  startSessionMaintenance(interval = 1 * 60 * 60 * 1000) {
     if (this.maintenanceTimer) {
       clearInterval(this.maintenanceTimer);
     }
@@ -77,6 +92,11 @@ class AccountManager {
     }, interval);
     
     console.log(`会话维护任务已启动，间隔: ${interval/1000/60/60}小时`);
+    
+    // 立即执行一次会话维护
+    setTimeout(() => {
+      this.maintainSessions();
+    }, 10000); // 启动10秒后执行
   }
 
   /**
@@ -96,6 +116,7 @@ class AccountManager {
    * @returns {Promise<boolean>} 是否刷新成功
    */
   async refreshSessionBySilentVisit(accountId) {
+    let win = null;
     try {
       const account = this.accounts.find(acc => acc.id === accountId);
       if (!account) {
@@ -130,45 +151,66 @@ class AccountManager {
       let visitUrl;
       switch(account.platform) {
         case 'meituan':
-          visitUrl = 'https://waimai.meituan.com/business/v2/index';
+          visitUrl = 'https://e.waimai.meituan.com/v2/index/home';
           break;
-        case 'jd':
-          visitUrl = 'https://daojia.jd.com/merchant';
+        case 'jingdong':
+          visitUrl = 'https://store.jddj.com/home';
+          break;
+        case 'eleme':
+          visitUrl = 'https://shanghu.ele.me/supervip/index';
           break;
         default:
-          visitUrl = platformConfig.homeUrl || platformConfig.loginUrl;
+          visitUrl = platformConfig.checkUrl || platformConfig.homeUrl || platformConfig.loginUrl;
       }
       
       console.log(`账号 ${account.username} 静默访问页面: ${visitUrl}`);
       
       // 使用window-manager创建新窗口并打开页面，使用账号专属的profile
-      const win = this.windowManager.createWindow({
-        id: sessionId,
+      win = this.windowManager.createWindow({
+        id: `silent-${sessionId}-${Date.now()}`, // 添加时间戳避免ID冲突
         url: visitUrl,
-        title: `${platformConfig.name} - ${account.username} (刷新会话)`,
-        width: 800,
-        height: 600,
-        show: false, // 静默模式不显示窗口
-        profileDir: profileDir // 使用账号专属的profile
+        title: `${platformConfig.name} - ${account.username} (会话维护)`,
+        width: 1, // 最小化窗口尺寸
+        height: 1,
+        show: false, // 不显示窗口
+        profileDir: profileDir, // 使用账号专属的profile
+        webPreferences: {
+          backgroundThrottling: false, // 禁用后台节流以确保脚本正常执行
+        }
       });
       
       if (!win) {
         throw new Error('创建窗口失败');
       }
       
+      // 确保窗口不可见
+      win.setSkipTaskbar(true); // 不在任务栏显示
+      win.setMenuBarVisibility(false); // 隐藏菜单栏
+      
       // 等待页面加载完成
       return new Promise((resolve, reject) => {
         // 设置超时
         const timeout = setTimeout(() => {
-          if (!win.isDestroyed()) {
-            win.close();
+          try {
+            if (win && !win.isDestroyed()) {
+              win.close();
+            }
+          } catch (err) {
+            console.error(`关闭窗口失败: ${err.message}`);
           }
           resolve(false);
-        }, 30000); // 30秒超时
+        }, 90000); // 90秒超时，增加等待时间
         
         // 监听页面加载完成事件
         win.webContents.on('did-finish-load', async () => {
           try {
+            // 检查窗口是否已销毁
+            if (!win || win.isDestroyed()) {
+              clearTimeout(timeout);
+              resolve(false);
+              return;
+            }
+            
             // 获取当前URL
             const currentUrl = win.webContents.getURL();
             console.log(`账号 ${account.username} 页面加载完成: ${currentUrl}`);
@@ -176,8 +218,12 @@ class AccountManager {
             // 检查是否重定向到了登录页面
             if (currentUrl.includes('login') || currentUrl.includes('signin')) {
               console.log(`账号 ${account.username} 被重定向到登录页面，会话可能已失效`);
-              if (!win.isDestroyed()) {
-                win.close();
+              try {
+                if (win && !win.isDestroyed()) {
+                  win.close();
+                }
+              } catch (err) {
+                console.error(`关闭窗口失败: ${err.message}`);
               }
               clearTimeout(timeout);
               resolve(false);
@@ -185,22 +231,126 @@ class AccountManager {
             }
             
             // 等待一段时间，确保页面完全加载和可能的异步操作完成
-            await new Promise(r => setTimeout(r, 5000));
+            await new Promise(r => setTimeout(r, 15000)); // 增加等待时间到15秒
+            
+            // 再次检查窗口是否已销毁
+            if (!win || win.isDestroyed()) {
+              clearTimeout(timeout);
+              resolve(false);
+              return;
+            }
+            
+            // 注入脚本检查登录状态
+            try {
+              const isLoggedIn = await win.webContents.executeJavaScript(`
+                (function() {
+                  try {
+                    // 检查是否有登录状态指示元素
+                    const hasLoginIndicator = [
+                      document.querySelector('.mt-component-nav'),
+                      document.querySelector('.mt-component-layout'),
+                      document.querySelector('.header-user-info'),
+                      document.querySelector('.merchant-dashboard'),
+                      document.querySelector('.admin-panel'),
+                      document.querySelector('.jddj-header'),
+                      document.querySelector('.navbar-right'),
+                      document.querySelector('.user-dropdown')
+                    ].some(el => !!el);
+                    
+                    // 检查URL特征
+                    const hasUrlIndicator = 
+                      window.location.href.includes('/merchant/') || 
+                      window.location.href.includes('/business/') ||
+                      window.location.href.includes('/admin/') ||
+                      window.location.href.includes('/dashboard') ||
+                      window.location.href.includes('/home') ||
+                      window.location.href.includes('/index');
+                    
+                    // 检查页面文本内容
+                    const bodyText = document.body.innerText || '';
+                    const hasTextIndicator = 
+                      bodyText.includes('全部门店') || 
+                      bodyText.includes('商家中心') ||
+                      bodyText.includes('订单管理') ||
+                      bodyText.includes('商品管理') ||
+                      bodyText.includes('账户管理') ||
+                      bodyText.includes('数据分析') ||
+                      bodyText.includes('退出') ||
+                      bodyText.includes('登出');
+                    
+                    // 检查特定元素的文本内容
+                    const headerTexts = Array.from(document.querySelectorAll('header, .header, .nav, .navbar, .navigation'))
+                      .map(el => el.innerText || '')
+                      .join(' ');
+                    
+                    const hasHeaderIndicator = 
+                      headerTexts.includes('退出') || 
+                      headerTexts.includes('登出') ||
+                      headerTexts.includes('账户') ||
+                      headerTexts.includes('设置');
+                    
+                    // 检查是否有登录失败或过期的提示
+                    const hasLoginFailure = 
+                      bodyText.includes('登录已过期') ||
+                      bodyText.includes('请重新登录') ||
+                      bodyText.includes('登录超时') ||
+                      bodyText.includes('会话已过期');
+                    
+                    // 如果有登录失败提示，则认为未登录
+                    if (hasLoginFailure) {
+                      return false;
+                    }
+                    
+                    return hasLoginIndicator || hasUrlIndicator || hasTextIndicator || hasHeaderIndicator;
+                  } catch (e) {
+                    console.error('检查登录状态出错:', e);
+                    return false;
+                  }
+                })();
+              `);
+              
+              console.log(`账号 ${account.username} 登录状态检查结果: ${isLoggedIn ? '已登录' : '未登录'}`);
+              
+              if (!isLoggedIn) {
+                console.log(`账号 ${account.username} 未检测到登录状态，可能需要重新登录`);
+                try {
+                  if (win && !win.isDestroyed()) {
+                    win.close();
+                  }
+                } catch (err) {
+                  console.error(`关闭窗口失败: ${err.message}`);
+                }
+                clearTimeout(timeout);
+                resolve(false);
+                return;
+              }
+            } catch (err) {
+              console.error(`执行登录状态检查脚本失败:`, err);
+              // 继续执行，不要因为脚本执行失败而中断流程
+            }
             
             // 获取并保存cookie
             const success = await this.saveCookiesForAccount(account.id, win);
             
-            // 关闭窗口
-            if (!win.isDestroyed()) {
-              win.close();
+            // 清理资源
+            try {
+              if (win && !win.isDestroyed()) {
+                win.close();
+              }
+            } catch (err) {
+              console.error(`关闭窗口失败: ${err.message}`);
             }
             
             clearTimeout(timeout);
             resolve(success);
           } catch (err) {
-            console.error(`账号 ${account.username} 刷新会话失败:`, err);
-            if (!win.isDestroyed()) {
-              win.close();
+            console.error(`处理页面加载完成事件失败:`, err);
+            try {
+              if (win && !win.isDestroyed()) {
+                win.close();
+              }
+            } catch (closeErr) {
+              console.error(`关闭窗口失败: ${closeErr.message}`);
             }
             clearTimeout(timeout);
             resolve(false);
@@ -210,184 +360,156 @@ class AccountManager {
         // 监听加载失败事件
         win.webContents.on('did-fail-load', (event, errorCode, errorDescription) => {
           console.error(`账号 ${account.username} 页面加载失败: ${errorDescription} (${errorCode})`);
-          if (!win.isDestroyed()) {
-            win.close();
+          try {
+            if (win && !win.isDestroyed()) {
+              win.close();
+            }
+          } catch (err) {
+            console.error(`关闭窗口失败: ${err.message}`);
           }
           clearTimeout(timeout);
           resolve(false);
         });
       });
     } catch (error) {
-      console.error(`账号 ${accountId} 静默访问刷新会话失败:`, error);
+      console.error(`刷新账号 ${accountId} 会话失败:`, error);
+      // 确保窗口被关闭
+      try {
+        if (win && !win.isDestroyed()) {
+          win.close();
+        }
+      } catch (err) {
+        console.error(`关闭窗口失败: ${err.message}`);
+      }
       return false;
     }
   }
 
   /**
-   * 维护账号会话
-   * 尝试刷新需要维护的账号
+   * 维护所有在线账号的会话
+   * @returns {Promise<{total: number, success: number, failed: number, results: Array}>} 维护结果统计
    */
   async maintainSessions() {
     try {
-      console.log('开始执行会话维护...');
+      // 筛选出在线账号
+      const onlineAccounts = this.accounts.filter(acc => acc.status === 'online');
+      console.log(`开始维护会话，共有 ${onlineAccounts.length} 个在线账号`);
       
-      // 先刷新状态
-      await this.refreshAccountStatus();
-      
-      // 找出需要刷新的账号
-      const accountsToRefresh = this.accounts.filter(account => {
-        // 如果账号状态为离线但未过期，自动登录刷新
-        if (account.status === 'offline') {
-          return true;
-        }
-        
-        // 检查cookie是否即将过期（超过48小时但小于72小时）
-        if (account.status === 'online' && account.lastCookieSaveTime) {
-          const lastCookieSave = new Date(account.lastCookieSaveTime);
-          const now = new Date();
-          const hoursSinceCookieSave = (now - lastCookieSave) / (1000 * 60 * 60);
-          
-          // 只有当cookie接近过期时（48小时以上）才刷新，避免破坏有效的登录状态
-          return hoursSinceCookieSave > 48;
-        }
-        
-        return false;
-      });
-      
-      console.log(`找到 ${accountsToRefresh.length} 个账号需要刷新会话`);
-      
-      // 依次处理每个账号，增加重试机制
-      for (const account of accountsToRefresh) {
-        let retryCount = 0;
-        const maxRetries = 2; // 最大重试次数
-        let success = false;
-        
-        while (retryCount <= maxRetries && !success) {
-          try {
-            console.log(`尝试刷新账号会话 (尝试 ${retryCount + 1}/${maxRetries + 1}): ${account.platform} - ${account.username}`);
-            
-            // 登录前先检查是否已经有活跃窗口，如果有则关闭
-            if (this.windowManager) {
-              const sessionId = `${account.platform}-${account.username}`;
-              const sessions = this.windowManager.getAllWindows();
-              if (sessions.has(sessionId) && !sessions.get(sessionId).isDestroyed()) {
-                console.log(`关闭账号 ${account.username} 的现有窗口`);
-                try {
-                  sessions.get(sessionId).close();
-                  // 等待窗口完全关闭
-                  await new Promise(resolve => setTimeout(resolve, 2000));
-                } catch (err) {
-                  console.error('关闭窗口失败:', err);
-                }
-              }
-            }
-            
-            // 检查是否有保存的cookie和profile目录
-            const hasSavedProfile = account.profileDir && fs.existsSync(account.profileDir);
-            const hasSavedCookies = account.cookies && account.lastCookieSaveTime;
-            
-            // 首先尝试静默访问页面刷新会话（适用于有效cookie的账号）
-            if (hasSavedCookies && hasSavedProfile) {
-              console.log(`账号 ${account.username} 尝试通过静默访问页面刷新会话`);
-              success = await this.refreshSessionBySilentVisit(account.id);
-              
-              if (success) {
-                console.log(`账号 ${account.username} 通过静默访问页面成功刷新会话`);
-                
-                // 记录成功的刷新时间
-                const index = this.accounts.findIndex(acc => acc.id === account.id);
-                if (index !== -1) {
-                  this.accounts[index].lastRefreshTime = new Date().toISOString();
-                  this.accounts[index].status = 'online';
-                  await this.saveAccounts();
-                }
-                
-                // 成功刷新，跳出重试循环
-                break;
-              } else {
-                console.log(`账号 ${account.username} 静默访问页面刷新失败，尝试重新登录`);
-              }
-            }
-            
-            // 如果静默访问失败或没有有效cookie，尝试重新登录
-            if (!success && account.status === 'offline') {
-              console.log(`账号 ${account.username} 尝试通过重新登录刷新会话`);
-              
-              // 使用静默模式登录账号
-              await this.loginAccount(account.id, true);
-              
-              // 等待登录完成
-              await new Promise(resolve => setTimeout(resolve, 5000));
-              
-              // 验证登录状态
-              await this.refreshAccountStatus(); // 刷新状态以获取最新信息
-              const updatedAccount = this.accounts.find(acc => acc.id === account.id);
-              
-              if (updatedAccount && updatedAccount.status === 'online') {
-                console.log(`账号 ${account.username} 通过重新登录成功刷新会话`);
-                success = true;
-                
-                // 记录成功的刷新时间
-                const index = this.accounts.findIndex(acc => acc.id === account.id);
-                if (index !== -1) {
-                  this.accounts[index].lastRefreshTime = new Date().toISOString();
-                  await this.saveAccounts();
-                }
-              } else {
-                throw new Error('登录后状态未变为在线');
-              }
-            }
-          } catch (err) {
-            retryCount++;
-            console.error(`刷新账号 ${account.username} 会话失败 (尝试 ${retryCount}/${maxRetries + 1}):`, err);
-            
-            // 如果登录失败但有有效的cookie，不要破坏原有状态
-            if (account.cookies && account.lastCookieSaveTime) {
-              const lastSaveTime = new Date(account.lastCookieSaveTime);
-              const now = new Date();
-              const hoursSinceSave = (now - lastSaveTime) / (1000 * 60 * 60);
-              
-              if (hoursSinceSave < 48) {
-                console.log(`账号 ${account.username} 有较新的cookie (${hoursSinceSave.toFixed(2)}小时前)，保留现有状态`);
-                // 将状态设置回在线
-                const index = this.accounts.findIndex(acc => acc.id === account.id);
-                if (index !== -1) {
-                  this.accounts[index].status = 'online';
-                  await this.saveAccounts();
-                }
-                success = true; // 视为成功，不再重试
-                break;
-              }
-            }
-            
-            if (retryCount <= maxRetries) {
-              // 增加重试间隔时间，避免过于频繁的请求
-              const waitTime = retryCount * 8000; // 8秒，16秒
-              console.log(`等待 ${waitTime/1000} 秒后重试...`);
-              await new Promise(resolve => setTimeout(resolve, waitTime));
-            }
-          }
-        }
-        
-        // 即使成功也等待一段时间再处理下一个账号，避免并发问题
-        const waitBetweenAccounts = 10000; // 10秒
-        console.log(`等待 ${waitBetweenAccounts/1000} 秒后处理下一个账号...`);
-        await new Promise(resolve => setTimeout(resolve, waitBetweenAccounts));
+      if (onlineAccounts.length === 0) {
+        console.log('没有在线账号，跳过会话维护');
+        return { total: 0, success: 0, failed: 0, results: [] };
       }
       
-      console.log('会话维护完成');
+      const results = [];
+      let successCount = 0;
+      let failedCount = 0;
       
-      // 返回维护结果统计
+      // 使用Promise.all并发处理多个账号，但限制并发数量
+      const concurrentLimit = 3; // 限制并发数量为3
+      const chunks = [];
+      
+      // 将账号分组，每组不超过并发限制
+      for (let i = 0; i < onlineAccounts.length; i += concurrentLimit) {
+        chunks.push(onlineAccounts.slice(i, i + concurrentLimit));
+      }
+      
+      // 按组顺序处理账号
+      for (const chunk of chunks) {
+        const chunkPromises = chunk.map(async (account) => {
+          const startTime = Date.now();
+          console.log(`开始为账号 ${account.username} (${account.platform}) 维护会话...`);
+          
+          try {
+            // 使用静默方式刷新会话
+            const success = await this.refreshSessionBySilentVisit(account.id);
+            const endTime = Date.now();
+            const duration = ((endTime - startTime) / 1000).toFixed(2);
+            
+            if (success) {
+              console.log(`账号 ${account.username} (${account.platform}) 会话维护成功，耗时 ${duration} 秒`);
+              successCount++;
+              results.push({
+                accountId: account.id,
+                username: account.username,
+                platform: account.platform,
+                success: true,
+                message: `会话维护成功，耗时 ${duration} 秒`,
+                timestamp: new Date().toISOString()
+              });
+              
+              // 更新账号最后活动时间
+              this.updateAccountLastActiveTime(account.id);
+            } else {
+              console.warn(`账号 ${account.username} (${account.platform}) 会话维护失败，耗时 ${duration} 秒`);
+              failedCount++;
+              results.push({
+                accountId: account.id,
+                username: account.username,
+                platform: account.platform,
+                success: false,
+                message: `会话维护失败，耗时 ${duration} 秒`,
+                timestamp: new Date().toISOString()
+              });
+              
+              // 标记账号可能离线
+              this.updateAccountStatus(account.id, 'unknown');
+            }
+          } catch (error) {
+            const endTime = Date.now();
+            const duration = ((endTime - startTime) / 1000).toFixed(2);
+            
+            console.error(`账号 ${account.username} (${account.platform}) 会话维护出错: ${error.message}，耗时 ${duration} 秒`);
+            failedCount++;
+            results.push({
+              accountId: account.id,
+              username: account.username,
+              platform: account.platform,
+              success: false,
+              message: `会话维护出错: ${error.message}，耗时 ${duration} 秒`,
+              timestamp: new Date().toISOString()
+            });
+            
+            // 标记账号可能离线
+            this.updateAccountStatus(account.id, 'unknown');
+          }
+        });
+        
+        // 等待当前组的所有账号处理完成
+        await Promise.all(chunkPromises);
+        
+        // 添加一些延迟，避免过快请求导致被平台限制
+        if (chunks.indexOf(chunk) < chunks.length - 1) {
+          console.log(`等待 5 秒后处理下一批账号...`);
+          await new Promise(resolve => setTimeout(resolve, 5000));
+        }
+      }
+      
+      const totalTime = new Date().toLocaleTimeString();
+      console.log(`会话维护完成 (${totalTime})，共 ${onlineAccounts.length} 个账号，成功: ${successCount}，失败: ${failedCount}`);
+      
+      // 如果有账号维护失败，记录警告日志
+      if (failedCount > 0) {
+        console.warn(`有 ${failedCount} 个账号会话维护失败，可能需要手动重新登录`);
+      }
+      
+      // 保存账号列表，确保状态更新被持久化
+      await this.saveAccounts();
+      
       return {
-        total: accountsToRefresh.length,
-        refreshed: accountsToRefresh.filter(acc => {
-          const account = this.accounts.find(a => a.id === acc.id);
-          return account && account.status === 'online';
-        }).length
+        total: onlineAccounts.length,
+        success: successCount,
+        failed: failedCount,
+        results: results
       };
     } catch (error) {
-      console.error('执行会话维护失败:', error);
-      return { total: 0, refreshed: 0, error: error.message };
+      console.error('会话维护过程中发生错误:', error);
+      return {
+        total: 0,
+        success: 0,
+        failed: 0,
+        error: error.message,
+        results: []
+      };
     }
   }
 
@@ -684,12 +806,22 @@ class AccountManager {
    */
   async saveCookiesForAccount(accountId, win) {
     try {
-      if (!win || win.isDestroyed()) {
+      if (!win) {
+        throw new Error('窗口参数为空');
+      }
+      
+      if (win.isDestroyed()) {
         throw new Error('窗口已关闭或不存在');
       }
       
       // 获取当前窗口的所有cookie
-      const cookies = await win.webContents.session.cookies.get({});
+      let cookies;
+      try {
+        cookies = await win.webContents.session.cookies.get({});
+      } catch (err) {
+        console.error(`获取cookie失败: ${err.message}`);
+        return false;
+      }
       
       if (!cookies || cookies.length === 0) {
         console.warn('没有找到可保存的cookie');
@@ -714,14 +846,34 @@ class AccountManager {
         'cookies.json'
       );
       
-      // 加密保存cookie
-      const encryptedCookies = this.encryptData(cookies);
-      fs.writeFileSync(cookieFilePath, encryptedCookies, 'utf8');
-      
-      console.log(`成功保存账号 ${account.username} 的cookie，共 ${cookies.length} 个`);
+      // 确保目录存在
+      try {
+        const cookieDir = path.dirname(cookieFilePath);
+        if (!fs.existsSync(cookieDir)) {
+          fs.mkdirSync(cookieDir, { recursive: true });
+          console.log(`为账号 ${account.username} 创建cookie目录: ${cookieDir}`);
+        }
+        
+        // 加密保存cookie
+        const encryptedCookies = this.encryptData(cookies);
+        fs.writeFileSync(cookieFilePath, encryptedCookies, 'utf8');
+        
+        console.log(`成功保存账号 ${account.username} 的cookie，共 ${cookies.length} 个`);
+      } catch (err) {
+        console.error(`保存cookie文件失败: ${err.message}`);
+        // 即使文件保存失败，我们仍然在内存中保存了cookie
+      }
       
       // 保存更新后的账号信息
-      await this.saveAccounts();
+      try {
+        await this.saveAccounts();
+      } catch (err) {
+        console.error(`保存账号信息失败: ${err.message}`);
+        // 继续执行，因为cookie已经保存
+      }
+      
+      // 更新账号状态为在线
+      this.accounts[index].status = 'online';
       
       return true;
     } catch (error) {
@@ -781,7 +933,7 @@ class AccountManager {
             account.lastStatusCheck = new Date().toISOString();
             console.log(`账号 ${account.username} 有活跃窗口，状态设置为在线`);
           } else if (hasValidCookie) {
-            account.status = 'online'; // 修改：有cookie就视为在线状态
+            account.status = 'online'; // 有cookie就视为在线状态
             account.lastStatusCheck = new Date().toISOString();
             console.log(`账号 ${account.username} 无活跃窗口但有有效cookie，状态设置为在线`);
           } else {
@@ -1034,6 +1186,230 @@ class AccountManager {
       console.error('解密数据失败:', error);
       // 解密失败时返回空数组，而不是抛出异常
       return [];
+    }
+  }
+
+  /**
+   * 批量登录账号
+   * @param {Array<string>} accountIds - 要登录的账号ID列表
+   * @param {boolean} silent - 是否静默登录（不显示浏览器窗口）
+   * @param {number} concurrentLimit - 并发登录的最大数量
+   * @returns {Promise<Object>} 登录结果
+   */
+  async batchLoginAccounts(accountIds, silent = true, concurrentLimit = 3) {
+    if (!Array.isArray(accountIds) || accountIds.length === 0) {
+      throw new Error('账号ID列表不能为空');
+    }
+    
+    console.log(`开始批量登录 ${accountIds.length} 个账号，并发数: ${concurrentLimit}`);
+    
+    // 结果统计
+    const results = {
+      total: accountIds.length,
+      success: 0,
+      failed: 0,
+      skipped: 0,
+      details: []
+    };
+    
+    // 创建任务队列
+    const queue = [...accountIds];
+    const inProgress = new Set();
+    const completed = new Set();
+    
+    // 定义处理单个账号的函数
+    const processAccount = async (accountId) => {
+      try {
+        if (completed.has(accountId)) return;
+        
+        inProgress.add(accountId);
+        
+        // 查找账号
+        const account = this.accounts.find(acc => acc.id === accountId);
+        if (!account) {
+          results.skipped++;
+          results.details.push({
+            id: accountId,
+            status: 'skipped',
+            message: '账号不存在'
+          });
+          return;
+        }
+        
+        console.log(`正在登录账号: ${account.username} (${account.platform})`);
+        
+        // 执行登录
+        const loginResult = await this.loginAccount(accountId, silent);
+        
+        if (loginResult.success) {
+          results.success++;
+          results.details.push({
+            id: accountId,
+            username: account.username,
+            platform: account.platform,
+            status: 'success',
+            message: '登录成功'
+          });
+        } else {
+          results.failed++;
+          results.details.push({
+            id: accountId,
+            username: account.username,
+            platform: account.platform,
+            status: 'failed',
+            message: loginResult.message || '登录失败'
+          });
+        }
+      } catch (error) {
+        console.error(`账号 ${accountId} 登录失败:`, error);
+        results.failed++;
+        results.details.push({
+          id: accountId,
+          status: 'error',
+          message: error.message
+        });
+      } finally {
+        inProgress.delete(accountId);
+        completed.add(accountId);
+      }
+    };
+    
+    // 并发执行登录任务
+    return new Promise((resolve) => {
+      const checkQueue = async () => {
+        // 如果队列为空且没有正在进行的任务，则完成
+        if (queue.length === 0 && inProgress.size === 0) {
+          console.log(`批量登录完成，成功: ${results.success}, 失败: ${results.failed}, 跳过: ${results.skipped}`);
+          resolve(results);
+          return;
+        }
+        
+        // 如果有空闲槽位且队列不为空，则启动新任务
+        while (inProgress.size < concurrentLimit && queue.length > 0) {
+          const accountId = queue.shift();
+          processAccount(accountId).catch(console.error);
+        }
+        
+        // 继续检查队列
+        setTimeout(checkQueue, 1000);
+      };
+      
+      // 开始处理队列
+      checkQueue();
+    });
+  }
+
+  /**
+   * 设置自动会话维护
+   * @param {boolean} enable - 是否启用自动会话维护
+   * @param {number} [intervalMinutes=60] - 会话维护间隔（分钟）
+   * @param {boolean} [runImmediately=true] - 是否立即执行一次会话维护
+   * @returns {boolean} 设置是否成功
+   */
+  setAutoSessionMaintenance(enable, intervalMinutes = 60, runImmediately = true) {
+    try {
+      // 清除现有的定时器
+      if (this.sessionMaintenanceTimer) {
+        clearInterval(this.sessionMaintenanceTimer);
+        this.sessionMaintenanceTimer = null;
+        console.log('已清除现有的会话维护定时器');
+      }
+      
+      if (enable) {
+        // 验证并调整间隔时间
+        let interval = parseInt(intervalMinutes, 10);
+        
+        if (isNaN(interval) || interval < 30) {
+          console.warn(`会话维护间隔时间 ${intervalMinutes} 分钟过短，已调整为最小值 30 分钟`);
+          interval = 30; // 最小间隔30分钟
+        } else if (interval > 1440) {
+          console.warn(`会话维护间隔时间 ${intervalMinutes} 分钟过长，已调整为最大值 1440 分钟（24小时）`);
+          interval = 1440; // 最大间隔24小时
+        }
+        
+        const intervalMs = interval * 60 * 1000; // 转换为毫秒
+        const nextMaintenanceTime = new Date(Date.now() + intervalMs);
+        const formattedTime = nextMaintenanceTime.toLocaleTimeString();
+        const formattedDate = nextMaintenanceTime.toLocaleDateString();
+        
+        console.log(`启用自动会话维护，间隔: ${interval} 分钟`);
+        console.log(`下次会话维护时间: ${formattedDate} ${formattedTime}`);
+        
+        // 设置定时器
+        this.sessionMaintenanceTimer = setInterval(async () => {
+          try {
+            console.log(`定时会话维护开始执行，当前时间: ${new Date().toLocaleString()}`);
+            const result = await this.maintainSessions();
+            
+            // 记录详细的维护结果
+            console.log(`定时会话维护完成: 共 ${result.total} 个账号，成功: ${result.success}，失败: ${result.failed}`);
+            
+            // 计算下次维护时间
+            const nextTime = new Date(Date.now() + intervalMs);
+            console.log(`下次会话维护时间: ${nextTime.toLocaleDateString()} ${nextTime.toLocaleTimeString()}`);
+            
+            // 如果有失败的账号，发送通知
+            if (result.failed > 0) {
+              this.emitEvent('session-maintenance-warning', {
+                message: `会话维护警告: ${result.failed} 个账号维护失败`,
+                result: result
+              });
+            }
+            
+            // 发送会话维护完成事件
+            this.emitEvent('session-maintenance-complete', result);
+          } catch (error) {
+            console.error('执行定时会话维护时出错:', error);
+            this.emitEvent('session-maintenance-error', {
+              message: '执行定时会话维护时出错',
+              error: error.message
+            });
+          }
+        }, intervalMs);
+        
+        // 是否立即执行一次
+        if (runImmediately) {
+          console.log('立即执行一次会话维护...');
+          
+          // 使用setTimeout确保异步执行不阻塞主流程
+          setTimeout(async () => {
+            try {
+              const result = await this.maintainSessions();
+              console.log(`立即会话维护完成: 共 ${result.total} 个账号，成功: ${result.success}，失败: ${result.failed}`);
+              
+              // 发送会话维护完成事件
+              this.emitEvent('session-maintenance-complete', result);
+            } catch (error) {
+              console.error('执行立即会话维护时出错:', error);
+              this.emitEvent('session-maintenance-error', {
+                message: '执行立即会话维护时出错',
+                error: error.message
+              });
+            }
+          }, 5000); // 延迟5秒执行，避免与其他初始化操作冲突
+        }
+        
+        return true;
+      } else {
+        console.log('已禁用自动会话维护');
+        return true;
+      }
+    } catch (error) {
+      console.error('设置自动会话维护时出错:', error);
+      return false;
+    }
+  }
+
+  /**
+   * 发送事件
+   * @param {string} eventName - 事件名称
+   * @param {any} data - 事件数据
+   */
+  emitEvent(eventName, data) {
+    try {
+      this.emit(eventName, data);
+    } catch (error) {
+      console.error(`发送事件 ${eventName} 失败:`, error);
     }
   }
 }

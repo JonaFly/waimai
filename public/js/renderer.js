@@ -148,6 +148,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
   
+  // 绑定批量操作相关的按钮
+  bindBatchOperationButtons();
+  
   // 加载账号列表和平台列表
   await loadAccounts();
   await loadPlatforms();
@@ -211,12 +214,24 @@ function renderAccountList(accounts) {
   accountList.innerHTML = '';
   
   if (accounts.length === 0) {
-    accountList.innerHTML = '<tr><td colspan="6" class="empty-list">暂无账号，请添加</td></tr>';
+    accountList.innerHTML = '<tr><td colspan="7" class="empty-list">暂无账号，请添加</td></tr>';
     return;
   }
   
   accounts.forEach(account => {
     const tr = document.createElement('tr');
+    tr.setAttribute('data-id', account.id);
+    tr.setAttribute('data-status', account.status);
+    
+    // 复选框
+    const checkboxTd = document.createElement('td');
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.className = 'account-checkbox';
+    checkbox.setAttribute('data-id', account.id);
+    checkbox.addEventListener('change', updateSelectAllCheckboxState);
+    checkboxTd.appendChild(checkbox);
+    tr.appendChild(checkboxTd);
     
     // 平台
     const platformTd = document.createElement('td');
@@ -279,6 +294,9 @@ function renderAccountList(accounts) {
   
   // 更新平台筛选器选项
   updatePlatformFilterOptions();
+  
+  // 更新批量登录平台选项
+  updateBatchLoginPlatformOptions();
 }
 
 // 更新平台筛选器选项
@@ -464,4 +482,311 @@ function showNotification(message, type = 'info') {
   setTimeout(() => {
     notification.classList.remove('show');
   }, 3000);
+}
+
+// 绑定批量操作相关的按钮
+function bindBatchOperationButtons() {
+  // 选择所有账号的复选框
+  const selectAllCheckbox = document.getElementById('select-all-accounts');
+  if (selectAllCheckbox) {
+    selectAllCheckbox.addEventListener('change', () => {
+      const checkboxes = document.querySelectorAll('.account-checkbox');
+      checkboxes.forEach(checkbox => {
+        checkbox.checked = selectAllCheckbox.checked;
+      });
+    });
+  }
+  
+  // 批量登录选中账号按钮
+  const batchLoginSelectedBtn = document.getElementById('batch-login-selected-btn');
+  if (batchLoginSelectedBtn) {
+    batchLoginSelectedBtn.addEventListener('click', async () => {
+      const selectedIds = getSelectedAccountIds();
+      if (selectedIds.length === 0) {
+        showNotification('请先选择要登录的账号', 'warning');
+        return;
+      }
+      
+      try {
+        batchLoginSelectedBtn.disabled = true;
+        batchLoginSelectedBtn.textContent = '登录中...';
+        
+        // 显示进度模态框
+        showBatchProgressModal();
+        
+        // 调用批量登录API
+        const result = await window.electronAPI.batchLoginAccounts({
+          accountIds: selectedIds,
+          silent: true,
+          concurrentLimit: 5
+        });
+        
+        // 更新进度
+        updateBatchProgress(result.success, result.total, '批量登录');
+        
+        // 显示结果
+        showBatchResult(result);
+        
+        // 刷新账号列表
+        await loadAccounts();
+      } catch (error) {
+        showNotification('批量登录失败: ' + error.message, 'error');
+        updateBatchProgressDetails(`批量登录失败: ${error.message}`, 'error');
+      } finally {
+        batchLoginSelectedBtn.disabled = false;
+        batchLoginSelectedBtn.textContent = '登录选中账号';
+      }
+    });
+  }
+  
+  // 选择所有离线账号按钮
+  const selectOfflineBtn = document.getElementById('select-offline-btn');
+  if (selectOfflineBtn) {
+    selectOfflineBtn.addEventListener('click', () => {
+      const offlineAccounts = document.querySelectorAll('tr[data-status="offline"] .account-checkbox');
+      offlineAccounts.forEach(checkbox => {
+        checkbox.checked = true;
+      });
+      
+      // 更新全选复选框状态
+      updateSelectAllCheckboxState();
+    });
+  }
+  
+  // 维护会话按钮（账号列表页面）
+  const maintainSessionsBtn = document.getElementById('maintain-sessions-btn');
+  if (maintainSessionsBtn) {
+    maintainSessionsBtn.addEventListener('click', async () => {
+      await startSessionMaintenance();
+    });
+  }
+  
+  // 开始批量登录按钮（批量操作页面）
+  const startBatchLoginBtn = document.getElementById('start-batch-login-btn');
+  if (startBatchLoginBtn) {
+    startBatchLoginBtn.addEventListener('click', async () => {
+      try {
+        startBatchLoginBtn.disabled = true;
+        startBatchLoginBtn.textContent = '登录中...';
+        
+        // 获取批量登录选项
+        const platform = document.getElementById('batch-login-platform').value;
+        const status = document.getElementById('batch-login-status').value;
+        const concurrentLimit = parseInt(document.getElementById('batch-login-limit').value) || 5;
+        const silent = document.getElementById('batch-login-silent').checked;
+        
+        // 筛选符合条件的账号
+        const accountsToLogin = allAccounts.filter(account => {
+          const matchesPlatform = !platform || account.platform === platform;
+          const matchesStatus = !status || account.status === status;
+          return matchesPlatform && matchesStatus;
+        });
+        
+        if (accountsToLogin.length === 0) {
+          showNotification('没有找到符合条件的账号', 'warning');
+          return;
+        }
+        
+        // 获取账号ID列表
+        const accountIds = accountsToLogin.map(account => account.id);
+        
+        // 显示进度模态框
+        showBatchProgressModal();
+        updateBatchStatusContent(`开始批量登录 ${accountIds.length} 个账号，并发数: ${concurrentLimit}`);
+        
+        // 调用批量登录API
+        const result = await window.electronAPI.batchLoginAccounts({
+          accountIds,
+          silent,
+          concurrentLimit
+        });
+        
+        // 更新进度
+        updateBatchProgress(result.success, result.total, '批量登录');
+        
+        // 显示结果
+        showBatchResult(result);
+        
+        // 刷新账号列表
+        await loadAccounts();
+      } catch (error) {
+        showNotification('批量登录失败: ' + error.message, 'error');
+        updateBatchProgressDetails(`批量登录失败: ${error.message}`, 'error');
+      } finally {
+        startBatchLoginBtn.disabled = false;
+        startBatchLoginBtn.textContent = '开始批量登录';
+      }
+    });
+  }
+  
+  // 开始会话维护按钮（批量操作页面）
+  const startMaintainSessionsBtn = document.getElementById('start-maintain-sessions-btn');
+  if (startMaintainSessionsBtn) {
+    startMaintainSessionsBtn.addEventListener('click', async () => {
+      await startSessionMaintenance();
+    });
+  }
+}
+
+// 获取选中的账号ID
+function getSelectedAccountIds() {
+  const checkboxes = document.querySelectorAll('.account-checkbox:checked');
+  return Array.from(checkboxes).map(checkbox => checkbox.getAttribute('data-id'));
+}
+
+// 更新全选复选框状态
+function updateSelectAllCheckboxState() {
+  const selectAllCheckbox = document.getElementById('select-all-accounts');
+  const checkboxes = document.querySelectorAll('.account-checkbox');
+  const checkedCheckboxes = document.querySelectorAll('.account-checkbox:checked');
+  
+  if (checkboxes.length > 0 && checkedCheckboxes.length === checkboxes.length) {
+    selectAllCheckbox.checked = true;
+    selectAllCheckbox.indeterminate = false;
+  } else if (checkedCheckboxes.length > 0) {
+    selectAllCheckbox.checked = false;
+    selectAllCheckbox.indeterminate = true;
+  } else {
+    selectAllCheckbox.checked = false;
+    selectAllCheckbox.indeterminate = false;
+  }
+}
+
+// 显示批量进度模态框
+function showBatchProgressModal() {
+  const modal = document.getElementById('batch-progress-modal');
+  if (modal) {
+    modal.style.display = 'block';
+    
+    // 重置进度
+    document.getElementById('batch-progress-value').style.width = '0%';
+    document.getElementById('batch-progress-text').textContent = '0/0 完成';
+    document.getElementById('batch-progress-details').innerHTML = '<p>准备开始批量操作...</p>';
+  }
+}
+
+// 更新批量进度
+function updateBatchProgress(completed, total, operation) {
+  const progressValue = document.getElementById('batch-progress-value');
+  const progressText = document.getElementById('batch-progress-text');
+  
+  if (progressValue && progressText) {
+    const percentage = total > 0 ? Math.round((completed / total) * 100) : 0;
+    progressValue.style.width = `${percentage}%`;
+    progressText.textContent = `${completed}/${total} 完成 (${percentage}%)`;
+    
+    // 更新批量状态内容
+    updateBatchStatusContent(`${operation}进度: ${completed}/${total} 完成 (${percentage}%)`);
+  }
+}
+
+// 更新批量进度详情
+function updateBatchProgressDetails(message, type = 'info') {
+  const progressDetails = document.getElementById('batch-progress-details');
+  if (progressDetails) {
+    const className = type === 'error' ? 'error-item' : type === 'success' ? 'success-item' : '';
+    const timestamp = new Date().toLocaleTimeString();
+    
+    const p = document.createElement('p');
+    p.className = className;
+    p.textContent = `[${timestamp}] ${message}`;
+    
+    progressDetails.appendChild(p);
+    progressDetails.scrollTop = progressDetails.scrollHeight;
+  }
+}
+
+// 更新批量状态内容
+function updateBatchStatusContent(message) {
+  const statusContent = document.getElementById('batch-status-content');
+  if (statusContent) {
+    const timestamp = new Date().toLocaleTimeString();
+    
+    const p = document.createElement('p');
+    p.textContent = `[${timestamp}] ${message}`;
+    
+    // 清空之前的内容
+    statusContent.innerHTML = '';
+    statusContent.appendChild(p);
+  }
+}
+
+// 显示批量操作结果
+function showBatchResult(result) {
+  if (!result) return;
+  
+  const { total, success, failed, failedAccounts } = result;
+  
+  // 更新进度详情
+  updateBatchProgressDetails(`批量操作完成，成功: ${success}/${total}，失败: ${failed}/${total}`, 'info');
+  
+  // 显示失败的账号
+  if (failedAccounts && failedAccounts.length > 0) {
+    updateBatchProgressDetails(`失败账号详情:`, 'info');
+    failedAccounts.forEach(account => {
+      updateBatchProgressDetails(`- ${account.username} (${getPlatformName(account.platform)}): ${account.error}`, 'error');
+    });
+  }
+  
+  // 显示通知
+  if (success === total) {
+    showNotification(`批量操作成功完成，全部 ${total} 个账号处理成功`, 'success');
+  } else {
+    showNotification(`批量操作部分完成，${success}/${total} 个账号处理成功，${failed}/${total} 个失败`, 'warning');
+  }
+}
+
+// 开始会话维护
+async function startSessionMaintenance() {
+  try {
+    // 显示进度模态框
+    showBatchProgressModal();
+    updateBatchProgressDetails('开始会话维护...', 'info');
+    updateBatchStatusContent('正在维护所有账号会话...');
+    
+    // 调用会话维护API
+    const result = await window.electronAPI.maintainAllSessions();
+    
+    // 更新进度
+    if (result && result.total) {
+      updateBatchProgress(result.refreshed, result.total, '会话维护');
+      
+      // 显示结果
+      updateBatchProgressDetails(`会话维护完成，成功刷新: ${result.refreshed}/${result.total}`, 'success');
+      showNotification(`会话维护完成，成功刷新: ${result.refreshed}/${result.total}`, 'success');
+    } else {
+      updateBatchProgressDetails('会话维护完成，但未返回详细结果', 'info');
+      showNotification('会话维护完成', 'success');
+    }
+    
+    // 刷新账号列表
+    await loadAccounts();
+  } catch (error) {
+    showNotification('会话维护失败: ' + error.message, 'error');
+    updateBatchProgressDetails(`会话维护失败: ${error.message}`, 'error');
+  }
+}
+
+// 更新批量登录平台选项
+function updateBatchLoginPlatformOptions() {
+  const batchLoginPlatform = document.getElementById('batch-login-platform');
+  if (!batchLoginPlatform) return;
+  
+  // 清空现有选项，保留第一个"所有平台"选项
+  while (batchLoginPlatform.options.length > 1) {
+    batchLoginPlatform.remove(1);
+  }
+  
+  // 获取所有平台
+  const platforms = [...new Set(allAccounts.map(acc => acc.platform))];
+  
+  // 添加平台选项
+  platforms.forEach(platform => {
+    if (platform) {
+      const option = document.createElement('option');
+      option.value = platform;
+      option.textContent = getPlatformName(platform);
+      batchLoginPlatform.appendChild(option);
+    }
+  });
 } 

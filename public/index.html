@@ -14,6 +14,7 @@
       <div class="tabs">
         <button class="tab-btn active" data-tab="accounts">账号列表</button>
         <button class="tab-btn" data-tab="add-account">添加账号</button>
+        <button class="tab-btn" data-tab="batch-operations">批量操作</button>
       </div>
     </header>
     
@@ -37,6 +38,7 @@
               </select>
             </div>
             <button id="refresh-btn" class="btn btn-primary">刷新状态</button>
+            <button id="maintain-sessions-btn" class="btn btn-secondary">维护会话</button>
           </div>
         </div>
         
@@ -63,6 +65,7 @@
           <table class="account-table">
             <thead>
               <tr>
+                <th><input type="checkbox" id="select-all-accounts"></th>
                 <th>平台</th>
                 <th>用户名</th>
                 <th>昵称</th>
@@ -73,10 +76,15 @@
             </thead>
             <tbody id="account-list">
               <tr>
-                <td colspan="6" class="loading">加载中...</td>
+                <td colspan="7" class="loading">加载中...</td>
               </tr>
             </tbody>
           </table>
+        </div>
+        
+        <div class="batch-actions">
+          <button id="batch-login-selected-btn" class="btn btn-primary">登录选中账号</button>
+          <button id="select-offline-btn" class="btn btn-secondary">选择所有离线账号</button>
         </div>
       </div>
       
@@ -106,6 +114,59 @@
             <button type="submit" class="btn btn-primary">添加</button>
           </div>
         </form>
+      </div>
+      
+      <!-- 批量操作面板 -->
+      <div id="batch-operations" class="tab-pane">
+        <h2>批量操作</h2>
+        
+        <div class="card">
+          <h3>批量登录</h3>
+          <p>一次性登录多个账号，适用于大规模账号验证。</p>
+          <div class="form-group">
+            <label for="batch-login-platform">选择平台</label>
+            <select id="batch-login-platform">
+              <option value="">所有平台</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="batch-login-status">选择状态</label>
+            <select id="batch-login-status">
+              <option value="">所有状态</option>
+              <option value="offline" selected>离线账号</option>
+              <option value="online">在线账号</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="batch-login-limit">并发数量限制</label>
+            <select id="batch-login-limit">
+              <option value="3">3个</option>
+              <option value="5" selected>5个</option>
+              <option value="10">10个</option>
+              <option value="20">20个</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="batch-login-silent">
+              <input type="checkbox" id="batch-login-silent" checked>
+              静默模式（不显示浏览器窗口）
+            </label>
+          </div>
+          <button id="start-batch-login-btn" class="btn btn-primary">开始批量登录</button>
+        </div>
+        
+        <div class="card">
+          <h3>会话维护</h3>
+          <p>刷新所有账号的会话状态，确保账号保持在线。</p>
+          <button id="start-maintain-sessions-btn" class="btn btn-primary">开始会话维护</button>
+        </div>
+        
+        <div id="batch-operation-status" class="status-panel">
+          <h3>操作状态</h3>
+          <div id="batch-status-content">
+            <p>未开始任何批量操作</p>
+          </div>
+        </div>
       </div>
     </main>
     
@@ -158,6 +219,27 @@
         <div class="modal-footer">
           <button id="confirm-delete-btn" class="btn btn-danger">删除</button>
           <button class="btn btn-secondary close-btn">取消</button>
+        </div>
+      </div>
+    </div>
+    
+    <!-- 批量操作进度模态框 -->
+    <div id="batch-progress-modal" class="modal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2>批量操作进度</h2>
+          <button class="close-btn">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="progress-container">
+            <div class="progress-bar">
+              <div id="batch-progress-value" class="progress-value"></div>
+            </div>
+            <div id="batch-progress-text" class="progress-text">0/0 完成</div>
+          </div>
+          <div id="batch-progress-details" class="progress-details">
+            <p>准备开始批量操作...</p>
+          </div>
         </div>
       </div>
     </div>

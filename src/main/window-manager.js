@@ -1,4 +1,4 @@
-const { BrowserWindow, session, ipcMain } = require('electron');
+const { BrowserWindow, session, ipcMain, app } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -16,6 +16,14 @@ class WindowManager {
     
     // 设置IPC监听器接收登录状态更新
     this._setupIpcListeners();
+    
+    // 监听所有窗口的关闭事件
+    app.on('window-all-closed', () => {
+      // 在macOS上，应用和菜单栏通常会保持活动状态，直到用户使用Cmd + Q显式退出
+      if (process.platform !== 'darwin') {
+        app.quit();
+      }
+    });
   }
   
   /**
@@ -102,147 +110,371 @@ class WindowManager {
   }
   
   /**
-   * 创建窗口
+   * 创建浏览器窗口
    * @param {Object} options - 窗口选项
-   * @param {string} options.id - 窗口ID
-   * @param {string} options.url - 加载的URL
-   * @param {string} options.title - 窗口标题
-   * @param {string} options.profileDir - 独立profile目录的路径
-   * @returns {BrowserWindow} 浏览器窗口
+   * @returns {BrowserWindow} 浏览器窗口实例
    */
   createWindow(options) {
-    // 确保选项存在
-    options = options || {};
+    const { id, url, title, width, height, show, profileDir } = options;
     
-    // 确保必要的选项
-    if (!options.id || !options.url) {
-      throw new Error('创建窗口失败: 窗口ID和URL为必填项');
+    // 检查是否已存在相同ID的窗口
+    const existingWindow = this.windows.get(id);
+    if (existingWindow && !existingWindow.isDestroyed()) {
+      existingWindow.show();
+      existingWindow.focus();
+      return existingWindow;
     }
     
-    // 如果窗口已存在，则返回
-    if (this.hasWindow(options.id)) {
-      const win = this.windows.get(options.id);
-      win.show();
-      win.focus();
-      return win;
-    }
-    
-    // 设置session分区，使用独立的profile
-    const partition = `persist:${options.id}`;
-    
-    // 如果提供了profile目录，设置session的userData路径
-    if (options.profileDir) {
-      console.log(`使用自定义profile目录: ${options.profileDir}`);
-      
-      // 确保目录存在
-      if (!fs.existsSync(options.profileDir)) {
-        fs.mkdirSync(options.profileDir, { recursive: true });
+    // 确保profile目录存在
+    if (profileDir && !fs.existsSync(profileDir)) {
+      try {
+        fs.mkdirSync(profileDir, { recursive: true });
+        console.log(`创建profile目录: ${profileDir}`);
+      } catch (err) {
+        console.error(`创建profile目录失败: ${err.message}`);
       }
-      
-      // 配置持久化session
-      const ses = session.fromPartition(partition, { cache: true });
-      
-      // 设置cookie的过期时间为最长
-      ses.cookies.set({
-        url: options.url,
-        name: 'session_persist',
-        value: 'true',
-        expirationDate: Math.floor(Date.now() / 1000) + (365 * 24 * 60 * 60), // 一年有效期
-        httpOnly: true,
-        secure: options.url.startsWith('https')
-      }).catch(err => console.error('设置持久化cookie失败:', err));
-      
-      // 禁用content-security-policy以允许跨域cookie
-      ses.webRequest.onHeadersReceived((details, callback) => {
-        if (details.responseHeaders && details.responseHeaders['Content-Security-Policy']) {
-          delete details.responseHeaders['Content-Security-Policy'];
-        }
-        callback({ cancel: false, responseHeaders: details.responseHeaders });
-      });
     }
     
-    // 创建新窗口
-    const win = new BrowserWindow({
-      width: options.width || 1200,
-      height: options.height || 800,
-      title: options.title ? `${options.title} - 外卖平台账号管理器` : '外卖平台账号管理器',
+    // 为每个窗口创建独立的session
+    const customSession = profileDir ? 
+      session.fromPartition(`persist:${id}`, { cache: false }) : 
+      session.fromPartition('temp');
+    
+    // 为每个窗口设置不同的用户代理，模拟不同的浏览器环境
+    const userAgents = [
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36',
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36',
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:96.0) Gecko/20100101 Firefox/96.0',
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.2 Safari/605.1.15',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36 Edg/96.0.1054.62',
+    ];
+    
+    // 根据ID生成一个唯一但稳定的索引，确保同一账号始终使用相同的UA
+    const hashCode = str => {
+      let hash = 0;
+      for (let i = 0; i < str.length; i++) {
+        hash = ((hash << 5) - hash) + str.charCodeAt(i);
+        hash |= 0; // 转换为32位整数
+      }
+      return Math.abs(hash);
+    };
+    
+    const uaIndex = hashCode(id) % userAgents.length;
+    const userAgent = userAgents[uaIndex];
+    
+    // 创建窗口配置
+    const windowConfig = {
+      width: width || 1024,
+      height: height || 768,
+      title: title || 'Browser Window',
+      show: show !== undefined ? show : true,
+      icon: path.join(__dirname, '../../public/default-icon.png'),
       webPreferences: {
+        preload: path.join(__dirname, 'browser-preload.js'),
         nodeIntegration: false,
         contextIsolation: true,
-        partition: partition, // 使用持久化的session
-        preload: path.join(__dirname, 'browser-preload.js'),
-        // 增加额外的webPreferences配置以提高持久化能力
-        persistentCookies: true,
-        cache: true
-      },
-      icon: path.resolve(__dirname, '../../public/default-icon.png')
-    });
+        partition: `persist:${id}`,
+        backgroundThrottling: false,
+        enableRemoteModule: false,
+        worldSafeExecuteJavaScript: true,
+        // 添加更多指纹保护选项
+        webSecurity: true,
+        allowRunningInsecureContent: false,
+        experimentalFeatures: false
+      }
+    };
     
-    // 设置窗口间通信
-    win.webContents.on('did-finish-load', () => {
-      // 添加消息监听器接收渲染进程的消息
-      win.webContents.on('ipc-message', (event, channel, ...args) => {
-        if (channel === 'login-status-update') {
-          const data = args[0];
-          if (data && data.username) {
-            this.setAccountStatus(data.username, data.status === 'success' ? 'online' : 'offline', data.platform);
-          }
+    // 创建浏览器窗口
+    const win = new BrowserWindow(windowConfig);
+    
+    // 设置自定义用户代理
+    win.webContents.userAgent = userAgent;
+    console.log(`窗口 ${id} 设置用户代理: ${userAgent}`);
+    
+    // 设置会话缓存路径（仅Windows平台支持）
+    if (process.platform === 'win32' && profileDir) {
+      try {
+        const cachePath = path.join(profileDir, 'cache');
+        if (!fs.existsSync(cachePath)) {
+          fs.mkdirSync(cachePath, { recursive: true });
         }
-      });
+        
+        if (win.webContents && win.webContents.session && 
+            typeof win.webContents.session.setCachePath === 'function') {
+          win.webContents.session.setCachePath(cachePath);
+          console.log(`窗口 ${id} 设置缓存路径: ${cachePath}`);
+        }
+      } catch (err) {
+        console.warn(`设置缓存路径失败: ${err.message}`);
+      }
+    }
+    
+    // 修改指纹信息
+    win.webContents.session.webRequest.onBeforeSendHeaders((details, callback) => {
+      // 修改请求头，添加更多随机性
+      const headers = details.requestHeaders;
+      
+      // 保持用户代理一致
+      headers['User-Agent'] = userAgent;
+      
+      // 修改Accept-Language，根据ID生成稳定的值
+      const languages = [
+        'zh-CN,zh;q=0.9,en;q=0.8',
+        'en-US,en;q=0.9,zh;q=0.8',
+        'zh-TW,zh;q=0.9,en;q=0.8',
+        'en-GB,en;q=0.9',
+        'ja-JP,ja;q=0.9,en;q=0.8',
+      ];
+      headers['Accept-Language'] = languages[hashCode(id) % languages.length];
+      
+      callback({ requestHeaders: headers });
     });
     
-    // 监听页面中的console.log消息，查找登录状态指示
-    win.webContents.on('console-message', (event, level, message) => {
-      // 检查消息中是否包含登录状态相关信息
-      if (message.includes('检测到登录成功特征元素') && options.id) {
-        // 从ID中提取用户名（假设ID格式为 platform-username）
-        const parts = options.id.split('-');
-        if (parts.length >= 2) {
-          const username = parts[1];
-          const platform = parts[0];
-          this.setAccountStatus(username, 'online', platform);
+    // 屏蔽WebRTC以防止IP泄露
+    win.webContents.on('did-finish-load', () => {
+      // 检查窗口是否已销毁
+      if (win.isDestroyed()) {
+        console.log(`窗口 ${id} 已销毁，无法注入浏览器保护脚本`);
+        return;
+      }
+
+      // 修改平台信息
+      const platforms = ['Win32', 'MacIntel', 'Linux x86_64'];
+      const platformIndex = hashCode(id) % platforms.length;
+      const selectedPlatform = platforms[platformIndex];
+      
+      // 使用更简单的方法注入脚本
+      const protectionScript = `
+        // 修改navigator.platform
+        try {
+          const originalPlatformGetter = Object.getOwnPropertyDescriptor(Navigator.prototype, 'platform').get;
+          Object.defineProperty(Navigator.prototype, 'platform', {
+            get: function() { return "${selectedPlatform}"; }
+          });
+          console.log('成功修改navigator.platform为: ${selectedPlatform}');
+        } catch (e) {
+          console.error('修改navigator.platform失败:', e);
+        }
+        
+        // 禁用WebRTC
+        try {
+          if (navigator.mediaDevices) {
+            navigator.mediaDevices.getUserMedia = function() {
+              return Promise.reject(new Error('getUserMedia is disabled'));
+            };
+            console.log('成功禁用WebRTC getUserMedia');
+          }
+          
+          // 禁用RTCPeerConnection
+          window.RTCPeerConnection = function() {
+            throw new Error('RTCPeerConnection is disabled');
+          };
+          window.webkitRTCPeerConnection = function() {
+            throw new Error('webkitRTCPeerConnection is disabled');
+          };
+          console.log('成功禁用RTCPeerConnection');
+        } catch (e) {
+          console.error('禁用WebRTC失败:', e);
+        }
+      `;
+      
+      win.webContents.executeJavaScript(protectionScript)
+        .then(() => {
+          console.log(`窗口 ${id} 成功应用浏览器指纹保护`);
+        })
+        .catch(err => {
+          console.error(`窗口 ${id} 应用浏览器指纹保护失败:`, err);
+        });
+    });
+    
+    // 加载URL
+    if (url) {
+      win.loadURL(url).catch(err => {
+        console.error(`加载URL失败: ${url}`, err);
+      });
+    }
+    
+    // 设置消息处理程序
+    this.setupMessageHandlers(win, id);
+    
+    // 存储窗口引用
+    this.windows.set(id, win);
+    
+    // 窗口关闭时清理引用和监听器
+    win.once('closed', () => {
+      console.log(`窗口 ${id} 已关闭，清理资源`);
+      
+      // 从窗口映射表中移除
+      this.windows.delete(id);
+      
+      // 移除所有特定于此窗口的监听器
+      win.removeAllListeners();
+      
+      // 如果有自定义session，可以考虑清理session
+      if (customSession && typeof customSession.clearCache === 'function') {
+        try {
+          customSession.clearCache().catch(err => {
+            console.warn(`清理窗口 ${id} 的session缓存失败:`, err);
+          });
+        } catch (err) {
+          console.warn(`尝试清理窗口 ${id} 的session时出错:`, err);
         }
       }
     });
     
-    // 配置session持久化选项
-    const ses = win.webContents.session;
+    return win;
+  }
+  
+  /**
+   * 设置窗口消息处理程序
+   * @param {BrowserWindow} win - 浏览器窗口实例
+   * @param {string} windowId - 窗口ID
+   */
+  setupMessageHandlers(win, windowId) {
+    // 从windowId中提取账号信息
+    const parts = windowId.split('-');
+    let platform = '';
+    let username = '';
     
-    // 使用替代方法配置缓存和存储
-    try {
-      // 配置缓存大小和存储选项
-      ses.setCacheSize(1024 * 1024 * 100); // 设置100MB缓存
-    } catch (err) {
-      console.warn('设置缓存大小失败，可能是API不支持:', err.message);
+    if (parts.length >= 2) {
+      platform = parts[0];
+      username = parts[1];
     }
     
-    // 增加cookie持久化配置
-    ses.cookies.set({
-      url: options.url,
-      name: 'persistent_session',
-      value: 'true',
-      expirationDate: Math.floor(Date.now() / 1000) + (365 * 24 * 60 * 60), // 一年有效期
-      httpOnly: true,
-      secure: options.url.startsWith('https')
-    }).catch(err => console.error('设置持久化cookie失败:', err));
+    // 创建一个特定于此窗口的消息处理函数
+    const messageHandler = (event, message) => {
+      try {
+        // 确保消息来自此窗口和窗口未被销毁
+        if (event.sender !== win.webContents || win.isDestroyed()) {
+          return;
+        }
+        
+        // 处理登录状态消息
+        if (message && message.type === 'login-status') {
+          const data = message.data;
+          
+          // 更新账号状态
+          if (username) {
+            this.updateAccountStatus(username, {
+              status: data.isLoggedIn ? 'online' : 'offline',
+              platform: data.platform || platform,
+              url: data.url,
+              indicator: data.indicator,
+              isLoginPage: data.isLoginPage,
+              lastUpdate: Date.now()
+            });
+            
+            // 发送状态更新事件
+            this.emitStatusUpdate(username, data.isLoggedIn ? 'online' : 'offline');
+          }
+        }
+      } catch (error) {
+        console.error(`处理窗口消息时出错: ${error.message}`);
+      }
+    };
     
-    // 加载URL
-    win.loadURL(options.url);
+    // 注册消息处理函数
+    ipcMain.on('message', messageHandler);
     
-    // 窗口关闭时从管理器中移除
-    win.on('closed', () => {
-      this.windows.delete(options.id);
+    // 窗口关闭时移除监听器，防止内存泄漏和对已销毁对象的引用
+    win.once('closed', () => {
+      ipcMain.removeListener('message', messageHandler);
+      console.log(`窗口 ${windowId} 已关闭，移除消息监听器`);
     });
     
-    // 存储窗口引用
-    this.windows.set(options.id, win);
+    // 监听页面加载完成事件
+    win.webContents.on('did-finish-load', () => {
+      try {
+        // 检查窗口是否已销毁
+        if (win.isDestroyed()) {
+          console.log(`窗口 ${windowId} 已销毁，无法注入脚本`);
+          return;
+        }
+        
+        // 使用更安全的方式注入窗口ID
+        const script = `
+          (function() {
+            try {
+              if (window.accountBrowser) {
+                console.log("正在设置窗口ID: \${windowId}");
+                if (typeof window.accountBrowser.setWindowId === 'function') {
+                  return window.accountBrowser.setWindowId('${windowId}');
+                } else {
+                  console.error("setWindowId方法不存在");
+                  window._windowId = '${windowId}';
+                  return false;
+                }
+              } else {
+                console.error("accountBrowser对象不存在");
+                return false;
+              }
+            } catch(e) {
+              console.error("设置窗口ID时出错:", e);
+              return false;
+            }
+          })();
+        `;
+        
+        win.webContents.executeJavaScript(script, true)
+          .then(result => {
+            if (result) {
+              console.log(`成功注入窗口ID: ${windowId}`);
+            } else {
+              console.warn(`注入窗口ID失败: ${windowId} - accountBrowser接口可能不可用`);
+            }
+          })
+          .catch(err => {
+            console.error(`注入窗口ID失败: ${windowId} - ${err.message}`);
+          });
+      } catch (err) {
+        console.error(`注入窗口ID时发生异常: ${err.message}`);
+      }
+    });
+  }
+  
+  /**
+   * 更新账号状态
+   * @param {string} username - 账号用户名
+   * @param {Object} status - 状态对象
+   */
+  updateAccountStatus(username, status) {
+    this.accountStatus.set(username, {
+      ...status,
+      timestamp: Date.now()
+    });
     
-    // 开发环境打开开发者工具
-    if (process.env.NODE_ENV === 'development') {
-      win.webContents.openDevTools();
-    }
+    console.log(`更新账号状态: ${username} => ${status.status} (${status.indicator || '无指示器'})`);
+  }
+  
+  /**
+   * 发送状态更新事件
+   * @param {string} username - 账号用户名
+   * @param {string} status - 状态
+   */
+  emitStatusUpdate(username, status) {
+    // 发送给所有窗口
+    BrowserWindow.getAllWindows().forEach(win => {
+      try {
+        if (!win.isDestroyed() && win.webContents) {
+          win.webContents.send('account-status-update', {
+            username,
+            status,
+            timestamp: Date.now()
+          });
+        }
+      } catch (error) {
+        console.error(`发送状态更新到窗口失败: ${error.message}`);
+      }
+    });
     
-    return win;
+    // 发送全局事件
+    app.emit('account-status-update', {
+      username,
+      status,
+      timestamp: Date.now()
+    });
   }
   
   /**
@@ -320,6 +552,12 @@ class WindowManager {
    * @returns {Map} 窗口映射表
    */
   getAllWindows() {
+    // 清理已销毁的窗口
+    for (const [id, win] of this.windows.entries()) {
+      if (win.isDestroyed()) {
+        this.windows.delete(id);
+      }
+    }
     return this.windows;
   }
   

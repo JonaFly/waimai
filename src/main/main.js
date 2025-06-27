@@ -33,6 +33,7 @@ async function initApp() {
     try {
       // 加载账号列表
       await accountManager.loadAccounts();
+      console.log(`成功加载账号列表，共 ${accountManager.getAccounts().length} 个账号`);
     } catch (loadError) {
       console.error('加载账号列表失败:', loadError);
       // 继续初始化应用，但显示错误通知
@@ -57,6 +58,40 @@ async function initApp() {
     
     // 设置IPC通信
     setupIPC();
+    
+    // 启用自动会话维护
+    // 参数: enable, intervalMinutes, runImmediately
+    const maintenanceInterval = 60; // 60分钟
+    const runImmediately = false; // 不立即执行，等应用稳定后再执行
+    const success = accountManager.setAutoSessionMaintenance(true, maintenanceInterval, runImmediately);
+    
+    if (success) {
+      console.log(`已启用自动会话维护，间隔 ${maintenanceInterval} 分钟，首次执行将在应用启动 5 秒后进行`);
+    } else {
+      console.error('启用自动会话维护失败');
+    }
+    
+    // 注册会话维护事件监听器
+    accountManager.on('session-maintenance-complete', (result) => {
+      console.log(`会话维护完成事件：成功 ${result.success}，失败 ${result.failed}`);
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('session-maintenance-complete', result);
+      }
+    });
+    
+    accountManager.on('session-maintenance-warning', (data) => {
+      console.warn(`会话维护警告：${data.message}`);
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('session-maintenance-warning', data);
+      }
+    });
+    
+    accountManager.on('session-maintenance-error', (data) => {
+      console.error(`会话维护错误：${data.message}`, data.error);
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('session-maintenance-error', data);
+      }
+    });
   } catch (error) {
     console.error('初始化应用失败:', error);
     dialog.showErrorBox('初始化失败', `初始化应用时发生错误: ${error.message}`);
@@ -325,7 +360,7 @@ function setupIPC() {
   });
 
   // 添加强制刷新会话的IPC处理
-  ipcMain.handle('account:force-refresh', async (event, accountId) => {
+  ipcMain.handle('force-refresh-session', async (event, accountId) => {
     try {
       return await accountManager.forceRefreshSession(accountId);
     } catch (error) {
@@ -375,6 +410,32 @@ function setupIPC() {
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('browser-status-message', message.data);
       }
+    }
+  });
+
+  // 添加批量登录账号的处理
+  ipcMain.handle('batch-login-accounts', async (event, { accountIds, silent = true, concurrentLimit = 5 }) => {
+    try {
+      console.log(`收到批量登录请求，账号数量: ${accountIds.length}`);
+      const result = await accountManager.batchLoginAccounts(accountIds, silent, concurrentLimit);
+      updateTrayMenu();
+      return result;
+    } catch (error) {
+      console.error('批量登录账号失败:', error);
+      throw error;
+    }
+  });
+  
+  // 添加维护所有会话的处理
+  ipcMain.handle('maintain-all-sessions', async () => {
+    try {
+      console.log('收到维护所有会话请求');
+      const result = await accountManager.maintainSessions();
+      updateTrayMenu();
+      return result;
+    } catch (error) {
+      console.error('维护所有会话失败:', error);
+      throw error;
     }
   });
 }

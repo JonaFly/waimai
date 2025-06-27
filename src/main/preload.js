@@ -59,5 +59,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
   
   // 强制刷新账号会话
-  forceRefreshSession: (accountId) => ipcRenderer.invoke('account:force-refresh', accountId)
+  forceRefreshSession: (accountId) => ipcRenderer.invoke('account:force-refresh', accountId),
+  
+  // 批量登录账号
+  batchLoginAccounts: (options) => ipcRenderer.invoke('batch-login-accounts', options),
+  
+  // 维护所有会话
+  maintainAllSessions: () => ipcRenderer.invoke('maintain-all-sessions')
 });
