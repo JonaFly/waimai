@@ -130,6 +130,27 @@ class WindowManager {
       try {
         fs.mkdirSync(profileDir, { recursive: true });
         console.log(`创建profile目录: ${profileDir}`);
+        
+        // 在Windows上确保目录有正确的权限
+        if (process.platform === 'win32') {
+          try {
+            // 尝试在目录中创建一个测试文件以验证权限
+            const testFilePath = path.join(profileDir, '.permission-test');
+            fs.writeFileSync(testFilePath, 'test', 'utf8');
+            fs.unlinkSync(testFilePath);
+            console.log(`验证Windows目录权限成功: ${profileDir}`);
+          } catch (permErr) {
+            console.error(`Windows目录权限验证失败: ${profileDir}`, permErr);
+            // 尝试使用更宽松的权限重新创建目录
+            try {
+              const { execSync } = require('child_process');
+              execSync(`icacls "${profileDir}" /grant:r "*S-1-1-0:(OI)(CI)F" /T`);
+              console.log(`已尝试修复Windows目录权限: ${profileDir}`);
+            } catch (fixErr) {
+              console.error(`修复Windows目录权限失败: ${fixErr.message}`);
+            }
+          }
+        }
       } catch (err) {
         console.error(`创建profile目录失败: ${err.message}`);
       }
@@ -196,18 +217,53 @@ class WindowManager {
     // 设置会话缓存路径（仅Windows平台支持）
     if (process.platform === 'win32' && profileDir) {
       try {
+        // 创建多个必要的子目录
         const cachePath = path.join(profileDir, 'cache');
-        if (!fs.existsSync(cachePath)) {
-          fs.mkdirSync(cachePath, { recursive: true });
-        }
+        const cookiesPath = path.join(profileDir, 'cookies');
+        const localStoragePath = path.join(profileDir, 'local_storage');
         
-        if (win.webContents && win.webContents.session && 
-            typeof win.webContents.session.setCachePath === 'function') {
-          win.webContents.session.setCachePath(cachePath);
-          console.log(`窗口 ${id} 设置缓存路径: ${cachePath}`);
+        // 确保所有目录都存在
+        [cachePath, cookiesPath, localStoragePath].forEach(dirPath => {
+          if (!fs.existsSync(dirPath)) {
+            try {
+              fs.mkdirSync(dirPath, { recursive: true });
+              console.log(`创建目录: ${dirPath}`);
+            } catch (err) {
+              console.error(`创建目录失败: ${dirPath}`, err);
+            }
+          }
+        });
+        
+        // 设置缓存路径
+        if (win.webContents && win.webContents.session) {
+          // 设置缓存路径
+          if (typeof win.webContents.session.setCachePath === 'function') {
+            win.webContents.session.setCachePath(cachePath);
+            console.log(`窗口 ${id} 设置缓存路径: ${cachePath}`);
+          }
+          
+          // 设置cookie存储路径
+          if (typeof win.webContents.session.setCookiesPath === 'function') {
+            win.webContents.session.setCookiesPath(cookiesPath);
+            console.log(`窗口 ${id} 设置cookie路径: ${cookiesPath}`);
+          } else {
+            console.warn(`窗口 ${id} 不支持设置cookie路径`);
+          }
+          
+          // 设置本地存储路径
+          if (typeof win.webContents.session.setLocalStoragePath === 'function') {
+            win.webContents.session.setLocalStoragePath(localStoragePath);
+            console.log(`窗口 ${id} 设置本地存储路径: ${localStoragePath}`);
+          } else {
+            console.warn(`窗口 ${id} 不支持设置本地存储路径`);
+          }
+          
+          // 禁用HTTP缓存以避免某些问题
+          win.webContents.session.setAllowCacheForCookies(true);
+          console.log(`窗口 ${id} 已启用cookie缓存`);
         }
       } catch (err) {
-        console.warn(`设置缓存路径失败: ${err.message}`);
+        console.warn(`设置存储路径失败: ${err.message}`);
       }
     }
     
