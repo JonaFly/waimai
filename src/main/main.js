@@ -5,6 +5,25 @@ const fs = require('fs');
 const AccountManager = require('./account-manager');
 const WindowManager = require('./window-manager');
 
+// 实现单实例锁定，防止多个实例同时运行
+const gotTheLock = app.requestSingleInstanceLock();
+
+// 如果无法获取锁，则表示已有实例在运行，退出当前实例
+if (!gotTheLock) {
+  console.log('另一个实例已经在运行，退出当前实例');
+  app.quit();
+} else {
+  // 如果获得了锁，则监听第二个实例的启动
+  app.on('second-instance', (event, commandLine, workingDirectory) => {
+    // 如果用户尝试打开另一个实例，我们应该聚焦到主窗口
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+}
+
 // 加密密钥 - 用于加密存储的账号信息
 // 注意：在实际生产环境中，应从安全的环境变量或配置文件中获取
 const ENCRYPTION_KEY = 'waimai-account-manager-encryption-key-v1';
@@ -43,18 +62,6 @@ async function initApp() {
     
     // 创建主窗口
     createMainWindow();
-    
-    // 暂时禁用系统托盘功能
-    /*
-    try {
-      // 创建系统托盘
-      createTray();
-    } catch (trayError) {
-      console.error('创建系统托盘失败:', trayError);
-      dialog.showErrorBox('系统托盘创建失败', 
-        `无法创建系统托盘: ${trayError.message}\n\n应用可以正常使用，但系统托盘功能将不可用。`);
-    }
-    */
     
     // 设置IPC通信
     setupIPC();
@@ -128,20 +135,19 @@ function createMainWindow() {
     mainWindow.webContents.openDevTools();
   }
 
-  // 窗口关闭事件处理
-  mainWindow.on('close', (e) => {
-    if (!isQuitting) {
-      e.preventDefault();
-      mainWindow.hide();
-      return false;
-    }
-    return true;
+  // 修改窗口关闭事件处理 - 直接退出应用而不是隐藏窗口
+  mainWindow.on('close', () => {
+    // 设置退出标志
+    isQuitting = true;
   });
 
   // 窗口关闭后清除引用
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
+
+  // 创建系统托盘
+  createTray();
 }
 
 /**
@@ -150,7 +156,7 @@ function createMainWindow() {
 function createTray() {
   try {
     // 创建托盘图标
-    const iconPath = path.resolve(__dirname, '../../public/app-icon.png');
+    const iconPath = path.resolve(__dirname, '../../public/default-icon.png');
     console.log('托盘图标路径:', iconPath);
     
     if (!fs.existsSync(iconPath)) {
@@ -460,4 +466,15 @@ app.on('activate', () => {
 // 应用退出前的处理
 app.on('before-quit', () => {
   isQuitting = true;
+  
+  // 清理可能的定时器和资源
+  if (accountManager) {
+    accountManager.setAutoSessionMaintenance(false);
+  }
+  
+  // 销毁托盘图标
+  if (tray) {
+    tray.destroy();
+    tray = null;
+  }
 }); 
