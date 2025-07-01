@@ -83,11 +83,14 @@
   "author": "Your Name",
   "license": "MIT",
   "dependencies": {
+    "better-sqlite3": "^12.2.0",
     "electron-store": "^8.2.0"
   },
   "devDependencies": {
     "cross-env": "^7.0.3",
     "electron": "^36.5.0",
-    "electron-builder": "^24.13.3"
+    "electron-builder": "^24.13.3",
+    "electron-packager": "^17.1.2",
+    "electron-rebuild": "^3.2.9"
   }
 }

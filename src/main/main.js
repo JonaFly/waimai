@@ -4,6 +4,9 @@ const path = require('path');
 const fs = require('fs');
 const AccountManager = require('./account-manager');
 const WindowManager = require('./window-manager');
+const { nativeImage } = require('electron');
+// 导入图标管理模块
+const iconManager = require('../../public/icon.js');
 
 // 实现单实例锁定，防止多个实例同时运行
 const gotTheLock = app.requestSingleInstanceLock();
@@ -35,10 +38,27 @@ let accountManager = null;
 let windowManager = null;
 let isQuitting = false;
 
+// 平台图标定义
+const PLATFORM_ICONS = {
+  'ele': '🍴',
+  'meituan': '🍱',
+  'jd': '🛒',
+  'taobao': '🛍️',
+  'pinduoduo': '🔥',
+  'alipay': '💰',
+  'wechat': '💬',
+  'qq': '🐧',
+  'weibo': '📱',
+  'bilibili': '📺',
+  'tiktok': '🎵',
+  'douyin': '🎵',
+  'default': '🔑'
+};
+
 /**
  * 初始化应用
  */
-async function initApp() {
+function initApp() {
   try {
     // 创建账号管理器
     accountManager = new AccountManager(ENCRYPTION_KEY);
@@ -49,60 +69,37 @@ async function initApp() {
     // 设置窗口管理器
     accountManager.setWindowManager(windowManager);
     
-    try {
-      // 加载账号列表
-      await accountManager.loadAccounts();
-      console.log(`成功加载账号列表，共 ${accountManager.getAccounts().length} 个账号`);
-    } catch (loadError) {
-      console.error('加载账号列表失败:', loadError);
-      // 继续初始化应用，但显示错误通知
-      dialog.showErrorBox('加载账号列表失败', 
-        `无法加载账号数据: ${loadError.message}\n\n这可能是由于数据文件损坏或格式变更导致。`);
-    }
-    
     // 创建主窗口
     createMainWindow();
     
-    // 设置IPC通信
-    setupIPC();
-    
-    // 启用自动会话维护
-    // 参数: enable, intervalMinutes, runImmediately
-    const maintenanceInterval = 60; // 60分钟
-    const runImmediately = false; // 不立即执行，等应用稳定后再执行
-    const success = accountManager.setAutoSessionMaintenance(true, maintenanceInterval, runImmediately);
-    
-    if (success) {
-      console.log(`已启用自动会话维护，间隔 ${maintenanceInterval} 分钟，首次执行将在应用启动 5 秒后进行`);
-    } else {
-      console.error('启用自动会话维护失败');
+    // 尝试创建系统托盘，但允许失败
+    try {
+      createTray();
+    } catch (trayError) {
+      console.error('创建系统托盘失败，但应用将继续运行:', trayError);
     }
     
-    // 注册会话维护事件监听器
-    accountManager.on('session-maintenance-complete', (result) => {
-      console.log(`会话维护完成事件：成功 ${result.success}，失败 ${result.failed}`);
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('session-maintenance-complete', result);
-      }
+    // 加载账号
+    accountManager.loadAccounts().then(accounts => {
+      console.log(`成功加载账号列表，共 ${accounts.length} 个账号`);
+      // 更新托盘菜单
+      updateTrayMenu();
+    }).catch(err => {
+      console.error('加载账号列表失败:', err);
+      dialog.showErrorBox('加载账号失败', err.message);
     });
     
-    accountManager.on('session-maintenance-warning', (data) => {
-      console.warn(`会话维护警告：${data.message}`);
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('session-maintenance-warning', data);
-      }
-    });
+    // 启用自动会话维护
+    const maintenanceInterval = 60; // 分钟
+    const runImmediately = false;
+    accountManager.setAutoSessionMaintenance(true, maintenanceInterval, runImmediately);
+    console.log(`已启用自动会话维护，间隔 ${maintenanceInterval} 分钟，首次执行将在应用启动 5 秒后进行`);
     
-    accountManager.on('session-maintenance-error', (data) => {
-      console.error(`会话维护错误：${data.message}`, data.error);
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('session-maintenance-error', data);
-      }
-    });
+    // 设置IPC处理程序
+    setupIpcHandlers();
   } catch (error) {
     console.error('初始化应用失败:', error);
-    dialog.showErrorBox('初始化失败', `初始化应用时发生错误: ${error.message}`);
-    app.exit(1);
+    dialog.showErrorBox('初始化失败', error.message);
   }
 }
 
@@ -117,7 +114,7 @@ function createMainWindow() {
     minHeight: 600,
     show: true,
     title: '外卖平台账号管理器',
-    icon: path.resolve(__dirname, '../../public/default-icon.png'),
+    icon: iconManager.getIconPath('app'), // 使用图标管理器
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
@@ -155,136 +152,65 @@ function createMainWindow() {
  */
 function createTray() {
   try {
-    // 创建托盘图标
-    const iconPath = path.resolve(__dirname, '../../public/default-icon.png');
-    console.log('托盘图标路径:', iconPath);
+    // 使用图标管理器创建托盘图标
+    const trayIcon = iconManager.createTrayIcon();
+    tray = new Tray(trayIcon);
     
-    if (!fs.existsSync(iconPath)) {
-      console.error(`托盘图标文件不存在: ${iconPath}`);
-      return; // 图标不存在时直接返回，不创建托盘
-    }
+    // 设置工具提示
+    tray.setToolTip('外卖账号管理器');
     
-    tray = new Tray(iconPath);
-    tray.setToolTip('外卖平台账号管理器');
-    
-    // 更新托盘菜单
-    updateTrayMenu();
-    
-    // 点击托盘图标显示主窗口
+    // 点击托盘图标时切换主窗口的可见性
     tray.on('click', () => {
       if (mainWindow) {
-        if (mainWindow.isVisible()) {
-          mainWindow.focus();
+        if (mainWindow.isDestroyed()) {
+          createMainWindow();
+        } else if (mainWindow.isVisible()) {
+          mainWindow.hide();
         } else {
           mainWindow.show();
+          mainWindow.focus();
         }
       } else {
         createMainWindow();
       }
     });
+    
+    // 设置右键菜单
+    const contextMenu = Menu.buildFromTemplate([
+      { 
+        label: '显示窗口', 
+        click: () => {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.show();
+            mainWindow.focus();
+          } else {
+            createMainWindow();
+          }
+        } 
+      },
+      { type: 'separator' },
+      { 
+        label: '退出', 
+        click: () => {
+          app.quit();
+        } 
+      }
+    ]);
+    
+    tray.setContextMenu(contextMenu);
+    console.log('系统托盘创建成功');
+    return tray;
   } catch (error) {
     console.error('创建系统托盘失败:', error);
-    // 不抛出错误，允许应用继续运行
+    console.log('应用将继续运行，但没有系统托盘图标');
+    return null;
   }
-}
-
-/**
- * 更新托盘菜单
- */
-function updateTrayMenu() {
-  if (!tray) return;
-  
-  const accounts = accountManager ? accountManager.getAccounts() : [];
-  
-  // 构建账号菜单项
-  const accountItems = accounts.map(account => {
-    const platformInfo = accountManager.platformConfigs[account.platform] || { name: '未知平台' };
-    
-    return {
-      label: `${account.nickname || account.username} (${platformInfo.name})`,
-      submenu: [
-        {
-          label: '登录',
-          click: () => {
-            accountManager.loginAccount(account.id)
-              .then(() => {
-                if (mainWindow) {
-                  mainWindow.webContents.send('account-status-changed');
-                }
-              })
-              .catch(err => {
-                dialog.showErrorBox('登录失败', err.message);
-              });
-          }
-        },
-        {
-          label: '显示账号信息',
-          click: () => {
-            if (mainWindow) {
-              mainWindow.show();
-              mainWindow.focus();
-              mainWindow.webContents.send('show-account-details', account.id);
-            } else {
-              createMainWindow();
-            }
-          }
-        }
-      ]
-    };
-  });
-
-  // 构建完整菜单
-  const contextMenu = Menu.buildFromTemplate([
-    {
-      label: '外卖平台账号管理器',
-      enabled: false
-    },
-    { type: 'separator' },
-    ...accountItems,
-    { type: 'separator' },
-    {
-      label: '显示主窗口',
-      click: () => {
-        if (mainWindow) {
-          mainWindow.show();
-          mainWindow.focus();
-        } else {
-          createMainWindow();
-        }
-      }
-    },
-    {
-      label: '刷新账号状态',
-      click: () => {
-        accountManager.refreshAccountStatus()
-          .then(() => {
-            if (mainWindow) {
-              mainWindow.webContents.send('account-status-changed');
-            }
-            updateTrayMenu();
-          })
-          .catch(err => {
-            dialog.showErrorBox('刷新状态失败', err.message);
-          });
-      }
-    },
-    { type: 'separator' },
-    {
-      label: '退出',
-      click: () => {
-        isQuitting = true;
-        app.quit();
-      }
-    }
-  ]);
-
-  tray.setContextMenu(contextMenu);
 }
 
 /**
  * 设置IPC通信
  */
-function setupIPC() {
+function setupIpcHandlers() {
   // 获取账号列表
   ipcMain.handle('get-accounts', async () => {
     try {
@@ -446,6 +372,136 @@ function setupIPC() {
   });
 }
 
+/**
+ * 更新托盘菜单
+ * 根据当前账号状态动态更新托盘菜单
+ */
+function updateTrayMenu() {
+  try {
+    if (!tray) {
+      console.warn('托盘对象不存在，无法更新菜单');
+      return false;
+    }
+    
+    // 获取账号列表
+    const accounts = accountManager.getAccounts();
+    
+    // 创建菜单模板
+    const menuTemplate = [
+      { label: '显示主窗口', click: () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.show();
+        } else {
+          createMainWindow();
+        }
+      }},
+      { type: 'separator' }
+    ];
+
+    // 按平台对账号进行分组
+    const platformGroups = {};
+    accounts.forEach(account => {
+      const platform = account.platform || 'default';
+      if (!platformGroups[platform]) {
+        platformGroups[platform] = [];
+      }
+      platformGroups[platform].push(account);
+    });
+
+    // 为每个平台创建子菜单
+    Object.keys(platformGroups).forEach(platform => {
+      const platformAccounts = platformGroups[platform];
+      const submenuItems = platformAccounts.map(account => {
+        // 状态图标
+        let statusIcon = '';
+        switch (account.status) {
+          case 'online':
+            statusIcon = '🟢';
+            break;
+          case 'logging':
+            statusIcon = '🟡';
+            break;
+          case 'inactive':
+          case 'offline':
+          default:
+            statusIcon = '🔴';
+            break;
+        }
+
+        return {
+          label: `${statusIcon} ${account.nickname || account.username}`,
+          submenu: [
+            { label: '登录', click: () => accountManager.loginAccount(account.id) },
+            { label: '刷新会话', click: () => accountManager.refreshSession(account.id) },
+            { type: 'separator' },
+            { label: '移除账号', click: () => {
+              accountManager.removeAccount(account.id).then(() => {
+                updateTrayMenu();
+              });
+            }}
+          ]
+        };
+      });
+
+      // 添加平台组子菜单
+      const platformIcon = PLATFORM_ICONS[platform] || PLATFORM_ICONS.default;
+      menuTemplate.push({
+        label: `${platformIcon} ${getPlatformName(platform)} (${platformAccounts.length})`,
+        submenu: submenuItems
+      });
+    });
+
+    // 添加批量操作菜单项
+    menuTemplate.push({ type: 'separator' });
+    menuTemplate.push({ 
+      label: '批量操作', 
+      submenu: [
+        { label: '刷新所有会话', click: () => accountManager.refreshAllSessions() },
+        { label: '登录所有账号', click: () => accountManager.loginAllAccounts() }
+      ]
+    });
+
+    // 添加退出菜单项
+    menuTemplate.push({ type: 'separator' });
+    menuTemplate.push({ label: '退出', role: 'quit' });
+
+    // 创建菜单并设置到托盘
+    const contextMenu = Menu.buildFromTemplate(menuTemplate);
+    tray.setContextMenu(contextMenu);
+    
+    console.log('托盘菜单已更新');
+    return true;
+  } catch (error) {
+    console.error('更新托盘菜单失败:', error);
+    return false;
+  }
+}
+
+/**
+ * 获取平台显示名称
+ * @param {string} platformId - 平台ID
+ * @returns {string} 平台显示名称
+ */
+function getPlatformName(platformId) {
+  const platformMap = {
+    'ele': '饿了么',
+    'meituan': '美团',
+    'jd': '京东',
+    'taobao': '淘宝',
+    'pinduoduo': '拼多多',
+    'alipay': '支付宝',
+    'wechat': '微信',
+    'qq': 'QQ',
+    'weibo': '微博',
+    'bilibili': 'B站',
+    'tiktok': '抖音国际版',
+    'douyin': '抖音',
+    'default': '未知平台'
+  };
+  
+  return platformMap[platformId] || platformMap.default;
+}
+
 // 应用初始化完成后启动
 app.whenReady().then(initApp);
 
@@ -463,18 +519,31 @@ app.on('activate', () => {
   }
 });
 
-// 应用退出前的处理
+// 应用退出前的清理工作
 app.on('before-quit', () => {
+  console.log('应用准备退出，执行清理工作...');
   isQuitting = true;
-  
-  // 清理可能的定时器和资源
-  if (accountManager) {
-    accountManager.setAutoSessionMaintenance(false);
-  }
   
   // 销毁托盘图标
   if (tray) {
     tray.destroy();
     tray = null;
   }
-}); 
+  
+  // 停止会话维护和清理资源
+  if (accountManager) {
+    // 停止会话维护定时器
+    accountManager.stopSessionMaintenance();
+    
+    // 安全关闭数据库连接
+    try {
+      if (accountManager.dbManager) {
+        accountManager.dbManager.close();
+      }
+    } catch (dbError) {
+      console.error('关闭数据库连接失败:', dbError);
+    }
+    
+    console.log('已停止会话维护和清理数据库连接');
+  }
+});

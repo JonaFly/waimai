@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const { app, shell } = require('electron');
 const loginScripts = require('./login-scripts');
 const EventEmitter = require('events');
+const DbManager = require('./db-manager');
 
 /**
  * 账号管理器类
@@ -65,6 +66,12 @@ class AccountManager extends EventEmitter {
     if (!fs.existsSync(this.dataDir)) {
       fs.mkdirSync(this.dataDir, { recursive: true });
     }
+    
+    // 初始化cookie缓存
+    this.accountCookies = {};
+    
+    // 初始化数据库管理器
+    this.dbManager = new DbManager(encryptionKey);
   }
   
   /**
@@ -118,6 +125,11 @@ class AccountManager extends EventEmitter {
   async refreshSessionBySilentVisit(accountId) {
     let win = null;
     try {
+      // 确保accountCookies已初始化
+      if (!this.accountCookies) {
+        this.accountCookies = {};
+      }
+
       const account = this.accounts.find(acc => acc.id === accountId);
       if (!account) {
         throw new Error(`未找到ID为 ${accountId} 的账号`);
@@ -192,7 +204,7 @@ class AccountManager extends EventEmitter {
           cookieLoadAttempts++;
           console.log(`尝试加载账号 ${account.username} 的cookie (尝试 ${cookieLoadAttempts}/${maxCookieLoadAttempts})...`);
           
-          cookieLoadSuccess = await this.loadCookiesForAccount(accountId, win);
+          cookieLoadSuccess = await this.loadCookiesForAccount(accountId, win.webContents.session, platformConfig.checkUrl);
           
           if (cookieLoadSuccess) {
             console.log(`账号 ${account.username} 的cookie已成功加载到静默刷新窗口`);
@@ -572,17 +584,82 @@ class AccountManager extends EventEmitter {
    */
   async loadAccounts() {
     try {
+      // 初始化为空数组，防止未定义错误
+      this.accounts = [];
+      
+      // 尝试从文件加载
       if (fs.existsSync(this.dataPath)) {
-        const data = fs.readFileSync(this.dataPath, 'utf8');
-        this.accounts = this.decryptData(data);
+        try {
+          console.log(`从文件加载账号列表: ${this.dataPath}`);
+          const data = fs.readFileSync(this.dataPath, 'utf8');
+          
+          if (data && data.trim().length > 0) {
+            const decryptedData = this.decryptData(data);
+            let loadedAccounts = JSON.parse(decryptedData);
+            
+            // 确保加载的是数组
+            if (Array.isArray(loadedAccounts)) {
+              this.accounts = loadedAccounts;
+              console.log(`从文件成功加载 ${this.accounts.length} 个账号`);
+            } else {
+              console.error('加载的账号数据不是数组格式，将使用空数组');
+              this.accounts = [];
+              // 保存正确的空数组格式
+              await this.saveAccounts();
+            }
+          } else {
+            console.warn('账号文件为空，将使用空账号列表');
+            this.accounts = [];
+            await this.saveAccounts();
+          }
+        } catch (error) {
+          console.error('加载账号文件失败:', error);
+          this.accounts = [];
+          // 备份可能损坏的账号文件
+          if (fs.existsSync(this.dataPath)) {
+            const backupPath = `${this.dataPath}.bak.${Date.now()}`;
+            fs.renameSync(this.dataPath, backupPath);
+            console.log(`已将可能损坏的账号文件备份到: ${backupPath}`);
+          }
+          // 创建新的空账号文件
+          await this.saveAccounts();
+        }
       } else {
-        // 如果文件不存在，创建空文件
+        console.log(`账号文件不存在，将创建新文件: ${this.dataPath}`);
         this.accounts = [];
-        this.saveAccounts();
+        await this.saveAccounts();
       }
+      
+      // 如果文件中没有账号，尝试从数据库加载
+      if (this.accounts.length === 0 && this.dbManager) {
+        try {
+          console.log('尝试从数据库加载账号...');
+          const dbAccounts = await this.dbManager.loadAccounts();
+          
+          if (Array.isArray(dbAccounts) && dbAccounts.length > 0) {
+            this.accounts = dbAccounts;
+            console.log(`从数据库成功加载 ${dbAccounts.length} 个账号`);
+            
+            // 更新文件以保持同步
+            await this.saveAccounts();
+          } else {
+            console.log('数据库中没有找到账号');
+          }
+        } catch (dbError) {
+          console.error('从数据库加载账号失败:', dbError);
+        }
+      }
+      
+      // 确保accounts始终是一个数组，防止出现map、filter等方法不存在的错误
+      if (!Array.isArray(this.accounts)) {
+        console.error('账号列表不是数组，重置为空数组');
+        this.accounts = [];
+        await this.saveAccounts();
+      }
+      
       return this.accounts;
     } catch (error) {
-      console.error('加载账号失败:', error);
+      console.error('加载账号列表出错:', error);
       this.accounts = [];
       return [];
     }
@@ -594,11 +671,30 @@ class AccountManager extends EventEmitter {
    */
   async saveAccounts() {
     try {
-      const data = this.encryptData(this.accounts);
-      fs.writeFileSync(this.dataPath, data, 'utf8');
+      const accountsToSave = this.accounts.map(account => {
+        // 克隆账号对象以避免修改原始对象
+        const accountCopy = { ...account };
+        
+        // 移除不需要保存的字段
+        delete accountCopy.cookies;
+        
+        // 返回处理后的账号对象
+        return accountCopy;
+      });
+      
+      const encryptedData = this.encryptData(JSON.stringify(accountsToSave));
+      
+      await fs.promises.writeFile(this.dataPath, encryptedData, 'utf8');
+      console.log(`账号列表已保存至 ${this.dataPath}`);
+
+      // 同时保存到数据库
+      accountsToSave.forEach(account => {
+        this.dbManager.saveAccount(account);
+      });
+      
       return true;
     } catch (error) {
-      console.error('保存账号失败:', error);
+      console.error('保存账号列表失败:', error);
       return false;
     }
   }
@@ -677,17 +773,27 @@ class AccountManager extends EventEmitter {
    */
   async deleteAccount(accountId) {
     try {
-      const index = this.accounts.findIndex(acc => acc.id === accountId);
-      if (index === -1) {
-        throw new Error(`未找到ID为 ${accountId} 的账号`);
+      const accountIndex = this.accounts.findIndex(a => a.id === accountId);
+      if (accountIndex === -1) {
+        throw new Error(`账号ID ${accountId} 不存在`);
       }
-
-      this.accounts.splice(index, 1);
+      
+      const account = this.accounts[accountIndex];
+      
+      // 从数组中移除账号
+      this.accounts.splice(accountIndex, 1);
+      
+      // 保存更新后的账号列表
       await this.saveAccounts();
+      
+      // 从数据库删除账号及其cookies
+      this.dbManager.deleteAccount(accountId);
+      
+      console.log(`账号 ${account.username} 已删除`);
       return true;
     } catch (error) {
       console.error('删除账号失败:', error);
-      throw error;
+      return false;
     }
   }
 
@@ -741,534 +847,373 @@ class AccountManager extends EventEmitter {
   }
 
   /**
+   * 为浏览器窗口设置事件监听
+   * @param {BrowserWindow} win - 浏览器窗口实例
+   * @param {Object} account - 账号对象
+   * @param {string} windowId - 窗口标识符
+   */
+  setupWindowEvents(win, account, windowId) {
+    if (!win || win.isDestroyed()) {
+      console.error(`窗口 ${windowId} 不存在或已销毁，无法设置事件`);
+      return;
+    }
+
+    // 设置窗口的用户代理
+    const userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36';
+    win.webContents.setUserAgent(userAgent);
+    console.log(`窗口 ${windowId} 设置用户代理: ${userAgent}`);
+
+    // 监听窗口关闭事件
+    win.on('closed', () => {
+      console.log(`窗口 ${windowId} 已关闭，移除消息监听器`);
+      
+      // 如果账号的活动窗口是当前窗口，则清除该引用
+      if (account && account.activeWindow === windowId) {
+        account.activeWindow = null;
+        
+        // 保存账号状态
+        this.saveAccounts().catch(err => {
+          console.error(`更新账号 ${account.username} 状态时出错:`, err);
+        });
+        
+        // 重要修改：窗口关闭后，调用refreshAccountStatus来检查cookie有效性
+        // 这样如果cookie有效，账号状态会保持为在线
+        console.log(`窗口 ${windowId} 已关闭，刷新账号状态以检查cookie有效性...`);
+        setTimeout(() => {
+          this.refreshAccountStatus().catch(err => {
+            console.error(`刷新账号状态时出错:`, err);
+          });
+        }, 100); // 延迟100毫秒，确保窗口完全关闭
+      }
+      
+      console.log(`窗口 ${windowId} 已关闭，清理资源`);
+    });
+
+    // 监听页面加载完成事件
+    win.webContents.on('did-finish-load', () => {
+      // 尝试获取页面标题和URL，可用于判断登录状态
+      const title = win.getTitle();
+      const url = win.webContents.getURL();
+      
+      console.log(`窗口 ${windowId} 页面加载完成: ${title} - ${url}`);
+      
+      // 检查是否已登录
+      this.checkLoginStatus(account.id).catch(err => {
+        console.error(`检查账号 ${account.username} 登录状态时出错:`, err);
+      });
+      
+      // 保存cookies
+      this.saveCookiesForAccount(account.id, win).catch(err => {
+        console.error(`保存账号 ${account.username} cookies时出错:`, err);
+      });
+    });
+
+    // 监听导航事件
+    win.webContents.on('did-navigate', (event, url) => {
+      console.log(`窗口 ${windowId} 导航到: ${url}`);
+      
+      // 检查是否为登录成功后的URL
+      const platformConfig = this.platformConfigs[account.platform];
+      if (platformConfig && url.includes(platformConfig.checkUrl)) {
+        console.log(`账号 ${account.username} 可能已登录成功，当前URL: ${url}`);
+        
+        // 保存cookies并更新状态
+        this.saveCookiesForAccount(account.id, win).catch(err => {
+          console.error(`保存账号 ${account.username} cookies时出错:`, err);
+        });
+        
+        // 更新账号状态为在线
+        this.updateAccountStatus(account.id, 'online').catch(err => {
+          console.error(`更新账号 ${account.username} 状态时出错:`, err);
+        });
+      }
+    });
+  }
+
+  /**
    * 登录账号
    * @param {string} accountId - 账号ID
-   * @param {boolean} silent - 是否静默登录（后台运行）
-   * @returns {Promise<boolean>} 是否登录成功
+   * @param {boolean} silent - 是否静默登录（不显示窗口）
+   * @returns {Promise<boolean>} - 是否成功启动登录过程
    */
   async loginAccount(accountId, silent = false) {
     try {
       const account = this.accounts.find(acc => acc.id === accountId);
+      
       if (!account) {
-        throw new Error(`未找到ID为 ${accountId} 的账号`);
-      }
-
-      // 获取平台配置
-      const platformConfig = this.platformConfigs[account.platform];
-      if (!platformConfig) {
-        throw new Error(`未知平台: ${account.platform}`);
-      }
-
-      if (!this.windowManager) {
-        throw new Error('窗口管理器未初始化');
-      }
-
-      // 创建唯一的会话ID
-      const sessionId = `${account.platform}-${account.username}`;
-      
-      // 创建账号专属的profile目录
-      const profileDir = path.join(this.profilesDir, sessionId);
-      if (!fs.existsSync(profileDir)) {
-        try {
-          fs.mkdirSync(profileDir, { recursive: true });
-          console.log(`为账号 ${account.username} 创建profile目录: ${profileDir}`);
-        } catch (err) {
-          console.error(`创建profile目录失败: ${err.message}`);
-        }
-      }
-      
-      // 使用window-manager创建新窗口并打开登录URL，指定使用账号专属的profile
-      const win = this.windowManager.createWindow({
-        id: sessionId,
-        url: platformConfig.loginUrl,
-        title: `${platformConfig.name} - ${account.username}`,
-        width: silent ? 800 : 1200,
-        height: silent ? 600 : 800,
-        show: !silent, // 静默模式不显示窗口
-        profileDir: profileDir // 添加profile目录参数
-      });
-      
-      // 尝试加载cookie到session
-      try {
-        await this.loadCookiesForAccount(accountId, win);
-      } catch (err) {
-        console.error(`加载账号 ${account.username} 的cookie失败:`, err);
-        // 继续执行，即使cookie加载失败
-      }
-      
-      // 为所有窗口注入自动填充脚本，不只是静默模式
-      if (win) {
-        win.webContents.on('did-finish-load', async () => {
-          try {
-            const url = win.webContents.getURL();
-            
-            // 检查是否在登录页面
-            if (url.includes('login') || url.includes('signin')) {
-              // 等待页面完全加载
-              await new Promise(resolve => setTimeout(resolve, 2000));
-              
-              // 注入自动填充脚本（根据不同平台可能需要调整）
-              await win.webContents.executeJavaScript(loginScripts.createLoginScript(account.platform, account.username, account.password));
-            }
-          } catch (err) {
-            console.error('执行自动登录脚本失败:', err);
-          }
-        });
-        
-        // 监听导航完成事件，用于保存cookie
-        win.webContents.on('did-navigate', async () => {
-          try {
-            // 获取当前URL
-            const currentUrl = win.webContents.getURL();
-            
-            // 检查是否已经登录成功（在非登录页面）
-            if (!currentUrl.includes('login') && !currentUrl.includes('signin')) {
-              // 获取并保存cookie
-              await this.saveCookiesForAccount(account.id, win);
-            }
-          } catch (err) {
-            console.error('保存cookie失败:', err);
-          }
-        });
-        
-        // 只有在静默模式下才设置自动关闭
-        if (silent) {
-          // 设置超时，一段时间后关闭静默窗口
-          setTimeout(() => {
-            if (!win.isDestroyed()) {
-              win.close();
-            }
-          }, 60000); // 1分钟后关闭
-        }
-      }
-
-      // 更新登录时间
-      const index = this.accounts.findIndex(acc => acc.id === accountId);
-      this.accounts[index].lastLoginTime = new Date().toISOString();
-      this.accounts[index].status = 'online';
-      
-      // 记录profile路径
-      this.accounts[index].profileDir = profileDir;
-      
-      await this.saveAccounts();
-
-      return true;
-    } catch (error) {
-      console.error('登录账号失败:', error);
-      throw error;
-    }
-  }
-  
-  /**
-   * 为指定账号保存cookie
-   * @param {string} accountId - 账号ID
-   * @param {BrowserWindow} win - 浏览器窗口实例
-   * @returns {Promise<boolean>} 是否保存成功
-   */
-  async saveCookiesForAccount(accountId, win) {
-    try {
-      if (!win) {
-        throw new Error('窗口参数为空');
-      }
-      
-      if (win.isDestroyed()) {
-        throw new Error('窗口已关闭或不存在');
-      }
-      
-      // 查找账号
-      const index = this.accounts.findIndex(acc => acc.id === accountId);
-      if (index === -1) {
-        throw new Error(`未找到ID为 ${accountId} 的账号`);
-      }
-      
-      const account = this.accounts[index];
-      console.log(`开始为账号 ${account.username} (${account.platform}) 保存cookie...`);
-      
-      // 获取当前窗口的所有cookie
-      let cookies;
-      let retries = 0;
-      const maxRetries = 3;
-      
-      while (retries < maxRetries) {
-        try {
-          cookies = await win.webContents.session.cookies.get({});
-          break; // 成功获取，跳出循环
-        } catch (err) {
-          retries++;
-          console.error(`获取cookie失败(尝试 ${retries}/${maxRetries}): ${err.message}`);
-          
-          if (retries >= maxRetries) {
-            throw new Error(`多次尝试获取cookie均失败: ${err.message}`);
-          }
-          
-          // 等待一段时间再重试
-          await new Promise(resolve => setTimeout(resolve, 1000));
-        }
-      }
-      
-      if (!cookies || cookies.length === 0) {
-        console.warn('没有找到可保存的cookie');
+        console.error(`未找到ID为 ${accountId} 的账号`);
         return false;
       }
       
-      console.log(`获取到账号 ${account.username} 的cookie，共 ${cookies.length} 个`);
+      const platformConfig = this.platformConfigs[account.platform];
       
-      // 过滤掉可能导致问题的cookie
-      const filteredCookies = cookies.filter(cookie => {
-        // 确保cookie有必要的字段
-        if (!cookie.name || cookie.name.trim() === '') {
-          console.warn('过滤掉无效的cookie: 名称为空');
-          return false;
-        }
-        
-        // 过滤掉可能导致问题的cookie (例如某些特殊的会话cookie)
-        const problematicNames = ['__Secure-', '__Host-', 'XSRF-TOKEN'];
-        if (problematicNames.some(prefix => cookie.name.startsWith(prefix))) {
-          console.warn(`过滤掉可能导致问题的cookie: ${cookie.name}`);
-          return false;
-        }
-        
-        return true;
-      });
-      
-      if (filteredCookies.length < cookies.length) {
-        console.log(`过滤后的cookie数量: ${filteredCookies.length} (原始: ${cookies.length})`);
-      }
-      
-      // 保存cookie到账号信息中
-      this.accounts[index].cookies = filteredCookies;
-      this.accounts[index].lastCookieSaveTime = new Date().toISOString();
-      
-      // 保存cookie到本地文件
-      const cookieFilePath = path.join(
-        this.profilesDir, 
-        `${account.platform}-${account.username}`, 
-        'cookies.json'
-      );
-      
-      // 在Windows上检查路径是否过长
-      let finalCookiePath = cookieFilePath;
-      if (process.platform === 'win32' && cookieFilePath.length > 260) {
-        console.warn(`Windows路径过长可能导致问题: ${cookieFilePath.length} 字符`);
-        
-        // 使用短路径
-        finalCookiePath = path.join(
-          this.profilesDir,
-          Buffer.from(`${account.platform}-${account.username}`).toString('base64').substring(0, 10),
-          'cookies.json'
-        );
-        console.log(`使用短路径保存cookie: ${finalCookiePath}`);
-      }
-      
-      // 确保目录存在
-      try {
-        const cookieDir = path.dirname(finalCookiePath);
-        if (!fs.existsSync(cookieDir)) {
-          fs.mkdirSync(cookieDir, { recursive: true });
-          console.log(`为账号 ${account.username} 创建cookie目录: ${cookieDir}`);
-          
-          // 在Windows上确保目录有正确的权限
-          if (process.platform === 'win32') {
-            try {
-              // 尝试在目录中创建一个测试文件以验证权限
-              const testFilePath = path.join(cookieDir, '.permission-test');
-              fs.writeFileSync(testFilePath, 'test', 'utf8');
-              fs.unlinkSync(testFilePath);
-              console.log(`验证Windows目录权限成功: ${cookieDir}`);
-            } catch (permErr) {
-              console.error(`Windows目录权限验证失败: ${cookieDir}`, permErr);
-              
-              // 尝试使用更宽松的权限重新创建目录
-              try {
-                const { execSync } = require('child_process');
-                execSync(`icacls "${cookieDir}" /grant:r "*S-1-1-0:(OI)(CI)F" /T`);
-                console.log(`已尝试修复Windows目录权限: ${cookieDir}`);
-              } catch (fixErr) {
-                console.error(`修复Windows目录权限失败: ${fixErr.message}`);
-              }
-            }
-          }
-        }
-        
-        // 加密保存cookie
-        const encryptedCookies = this.encryptData(filteredCookies);
-        
-        // 在Windows上使用安全的文件写入方式
-        if (process.platform === 'win32') {
-          // 先写入临时文件，然后重命名
-          const tempFilePath = `${finalCookiePath}.tmp`;
-          fs.writeFileSync(tempFilePath, encryptedCookies, 'utf8');
-          
-          // 如果目标文件已存在，先删除
-          if (fs.existsSync(finalCookiePath)) {
-            fs.unlinkSync(finalCookiePath);
-          }
-          
-          // 重命名临时文件
-          fs.renameSync(tempFilePath, finalCookiePath);
-        } else {
-          // 非Windows平台直接写入
-          fs.writeFileSync(finalCookiePath, encryptedCookies, 'utf8');
-        }
-        
-        console.log(`成功保存账号 ${account.username} 的cookie到文件，共 ${filteredCookies.length} 个`);
-      } catch (err) {
-        console.error(`保存cookie文件失败: ${err.message}`);
-        // 即使文件保存失败，我们仍然在内存中保存了cookie
-      }
-      
-      // 保存更新后的账号信息
-      try {
-        await this.saveAccounts();
-      } catch (err) {
-        console.error(`保存账号信息失败: ${err.message}`);
-        // 继续执行，因为cookie已经保存
-      }
-      
-      // 更新账号状态为在线
-      this.accounts[index].status = 'online';
-      
-      return true;
-    } catch (error) {
-      console.error('保存cookie失败:', error);
-      return false;
-    }
-  }
-
-  /**
-   * 加载账号的cookie到session中
-   * @param {string} accountId - 账号ID
-   * @param {BrowserWindow} win - 浏览器窗口实例
-   * @returns {Promise<boolean>} 是否加载成功
-   */
-  async loadCookiesForAccount(accountId, win) {
-    try {
-      if (!win) {
-        throw new Error('窗口参数为空');
-      }
-      
-      if (win.isDestroyed()) {
-        throw new Error('窗口已关闭或不存在');
-      }
-      
-      // 查找账号
-      const account = this.accounts.find(acc => acc.id === accountId);
-      if (!account) {
-        throw new Error(`未找到ID为 ${accountId} 的账号`);
+      if (!platformConfig) {
+        console.error(`未找到平台 ${account.platform} 的配置`);
+        return false;
       }
       
       console.log(`开始为账号 ${account.username} (${account.platform}) 加载cookie...`);
       
-      // 尝试从账号对象中加载cookie
-      if (account.cookies && Array.isArray(account.cookies) && account.cookies.length > 0) {
-        console.log(`从内存中加载账号 ${account.username} 的cookie，共 ${account.cookies.length} 个`);
+      // 创建浏览器窗口
+      const windowId = `${account.platform}-${account.id}`;
+      const win = this.windowManager.createWindow({
+        id: windowId,
+        title: `${platformConfig.name} - ${account.username}`,
+        width: 1280,
+        height: 800,
+        show: !silent
+      });
+      
+      // 注册窗口事件
+      this.setupWindowEvents(win, account, windowId);
+      
+      // 先尝试使用cookie登录
+      try {
+        // 加载cookie
+        await this.loadCookiesForAccount(accountId, win.webContents.session, platformConfig.loginUrl);
         
-        // 设置cookie到session
-        let successCount = 0;
-        let failCount = 0;
+        // 访问登录页
+        win.loadURL(platformConfig.loginUrl);
         
-        for (const cookie of account.cookies) {
-          try {
-            // 构建cookie对象，确保所有必要字段都存在
-            const cookieObj = {
-              url: cookie.domain ? 
-                (cookie.secure ? 'https://' : 'http://') + cookie.domain : 
-                'https://example.com',
-              name: cookie.name,
-              value: cookie.value,
-              domain: cookie.domain,
-              path: cookie.path || '/',
-              secure: !!cookie.secure,
-              httpOnly: !!cookie.httpOnly,
-              expirationDate: cookie.expirationDate || (Date.now() / 1000 + 365 * 24 * 60 * 60) // 默认一年
-            };
-            
-            // 在Windows上，某些cookie可能需要特殊处理
-            if (process.platform === 'win32') {
-              // 确保domain不以点开头（Windows上可能有问题）
-              if (cookieObj.domain && cookieObj.domain.startsWith('.')) {
-                cookieObj.domain = cookieObj.domain.substring(1);
-              }
-              
-              // 确保URL格式正确
-              if (!cookieObj.url.includes('://')) {
-                cookieObj.url = 'https://' + cookieObj.domain;
-              }
-            }
-            
-            await win.webContents.session.cookies.set(cookieObj);
-            successCount++;
-          } catch (err) {
-            failCount++;
-            console.error(`设置cookie失败: ${cookie.name}=${cookie.value}, 错误: ${err.message}`);
-            
-            // 尝试使用简化的cookie对象重试一次
-            try {
-              const simpleCookie = {
-                url: 'https://' + (cookie.domain || 'example.com'),
-                name: cookie.name,
-                value: cookie.value
-              };
-              await win.webContents.session.cookies.set(simpleCookie);
-              console.log(`使用简化参数重试设置cookie成功: ${cookie.name}`);
-              successCount++; // 重试成功
-              failCount--; // 减去之前计数的失败
-            } catch (retryErr) {
-              console.error(`重试设置cookie仍然失败: ${cookie.name}, 错误: ${retryErr.message}`);
-              // 继续处理其他cookie
-            }
-          }
-        }
+        // 更新账号状态
+        account.status = 'logging';
+        account.activeWindow = windowId;
+        await this.saveAccounts();
         
-        console.log(`成功加载账号 ${account.username} 的cookie到session，成功: ${successCount}，失败: ${failCount}`);
+        return true;
+      } catch (err) {
+        console.error(`使用cookie登录账号 ${account.username} 失败:`, err);
         
-        // 即使有部分失败，只要有成功的就返回true
-        if (successCount > 0) {
+        // 如果cookie登录失败，尝试手动登录
+        if (account.username && account.password) {
+          win.loadURL(platformConfig.loginUrl);
+          
+          // 更新账号状态
+          account.status = 'logging';
+          account.activeWindow = windowId;
+          await this.saveAccounts();
+          
+          return true;
+        } else {
+          console.error(`账号 ${account.username} 没有保存用户名和密码，无法自动登录`);
+          
+          // 如果没有保存凭据，只打开登录页
+          win.loadURL(platformConfig.loginUrl);
+          
+          // 更新账号状态
+          account.status = 'logging';
+          account.activeWindow = windowId;
+          await this.saveAccounts();
+          
           return true;
         }
       }
-      
-      // 如果内存中没有cookie或全部设置失败，尝试从文件加载
-      const cookieFilePath = path.join(
-        this.profilesDir, 
-        `${account.platform}-${account.username}`, 
-        'cookies.json'
-      );
-      
-      console.log(`尝试从文件加载cookie: ${cookieFilePath}`);
-      
-      // 检查文件是否存在
-      if (!fs.existsSync(cookieFilePath)) {
-        console.log(`账号 ${account.username} 没有保存的cookie文件: ${cookieFilePath}`);
-        
-        // 在Windows上检查路径是否过长
-        if (process.platform === 'win32' && cookieFilePath.length > 260) {
-          console.warn(`Windows路径过长可能导致问题: ${cookieFilePath.length} 字符`);
-          
-          // 尝试使用短路径
-          try {
-            const shortPath = path.join(
-              this.profilesDir,
-              Buffer.from(`${account.platform}-${account.username}`).toString('base64').substring(0, 10),
-              'cookies.json'
-            );
-            
-            if (fs.existsSync(shortPath)) {
-              console.log(`找到备用短路径cookie文件: ${shortPath}`);
-              return await this.loadCookiesFromFile(shortPath, win, account);
-            }
-          } catch (err) {
-            console.error(`尝试使用短路径失败: ${err.message}`);
-          }
-        }
-        
-        return false;
-      }
-      
-      return await this.loadCookiesFromFile(cookieFilePath, win, account);
     } catch (error) {
-      console.error('加载cookie失败:', error);
+      console.error(`登录过程中发生错误:`, error);
       return false;
     }
   }
   
   /**
-   * 从文件加载cookie到session
-   * @private
-   * @param {string} filePath - cookie文件路径
-   * @param {BrowserWindow} win - 浏览器窗口实例
-   * @param {Object} account - 账号对象
-   * @returns {Promise<boolean>} 是否加载成功
+   * 保存账号的cookies
+   * @param {string} accountId - 账号ID
+   * @param {BrowserWindow} window - 浏览器窗口实例
+   * @returns {Promise<boolean>} - 是否成功保存cookies
    */
-  async loadCookiesFromFile(filePath, win, account) {
+  async saveCookiesForAccount(accountId, window) {
     try {
-      // 读取并解密cookie文件
-      const encryptedData = fs.readFileSync(filePath, 'utf8');
-      const cookies = this.decryptData(encryptedData);
-      
-      if (!Array.isArray(cookies) || cookies.length === 0) {
-        console.warn(`账号 ${account.username} 的cookie文件格式无效或为空`);
+      // 验证参数
+      if (!window || window.isDestroyed()) {
+        console.error(`窗口不存在或已销毁，无法保存cookies`);
         return false;
       }
       
-      console.log(`从文件加载账号 ${account.username} 的cookie，共 ${cookies.length} 个`);
-      
-      // 设置cookie到session
-      let successCount = 0;
-      let failCount = 0;
-      
-      for (const cookie of cookies) {
-        try {
-          // 构建cookie对象，确保所有必要字段都存在
-          const cookieObj = {
-            url: cookie.domain ? 
-              (cookie.secure ? 'https://' : 'http://') + cookie.domain : 
-              'https://example.com',
-            name: cookie.name,
-            value: cookie.value,
-            domain: cookie.domain,
-            path: cookie.path || '/',
-            secure: !!cookie.secure,
-            httpOnly: !!cookie.httpOnly,
-            expirationDate: cookie.expirationDate || (Date.now() / 1000 + 365 * 24 * 60 * 60) // 默认一年
-          };
-          
-          // 在Windows上，某些cookie可能需要特殊处理
-          if (process.platform === 'win32') {
-            // 确保domain不以点开头（Windows上可能有问题）
-            if (cookieObj.domain && cookieObj.domain.startsWith('.')) {
-              cookieObj.domain = cookieObj.domain.substring(1);
-            }
-            
-            // 确保URL格式正确
-            if (!cookieObj.url.includes('://')) {
-              cookieObj.url = 'https://' + cookieObj.domain;
-            }
-          }
-          
-          await win.webContents.session.cookies.set(cookieObj);
-          successCount++;
-        } catch (err) {
-          failCount++;
-          console.error(`设置cookie失败: ${cookie.name}=${cookie.value}, 错误: ${err.message}`);
-          
-          // 尝试使用简化的cookie对象重试一次
-          try {
-            const simpleCookie = {
-              url: 'https://' + (cookie.domain || 'example.com'),
-              name: cookie.name,
-              value: cookie.value
-            };
-            await win.webContents.session.cookies.set(simpleCookie);
-            console.log(`使用简化参数重试设置cookie成功: ${cookie.name}`);
-            successCount++; // 重试成功
-            failCount--; // 减去之前计数的失败
-          } catch (retryErr) {
-            console.error(`重试设置cookie仍然失败: ${cookie.name}, 错误: ${retryErr.message}`);
-            // 继续处理其他cookie
-          }
-        }
+      const account = this.accounts.find(acc => acc.id === accountId);
+      if (!account) {
+        console.error(`账号ID ${accountId} 不存在，无法保存cookies`);
+        return false;
       }
       
-      console.log(`从文件加载账号 ${account.username} 的cookie，成功: ${successCount}，失败: ${failCount}`);
+      // 获取所有cookies
+      const cookies = await window.webContents.session.cookies.get({});
       
-      // 更新账号对象中的cookie
-      const index = this.accounts.findIndex(acc => acc.id === account.id);
-      if (index !== -1) {
-        this.accounts[index].cookies = cookies;
-        this.accounts[index].lastCookieSaveTime = new Date().toISOString();
+      if (!cookies || cookies.length === 0) {
+        console.error(`账号 ${account.username} 没有cookies可保存`);
+        return false;
+      }
+      
+      console.log(`获取到账号 ${account.username} 的 ${cookies.length} 个cookies`);
+      
+      // 过滤和清理cookies
+      const filteredCookies = cookies.filter(cookie => {
+        // 过滤掉某些不需要的cookie（如果有特定要求）
+        return true;
+      });
+      
+      if (filteredCookies.length === 0) {
+        console.error(`账号 ${account.username} 过滤后没有有效cookies`);
+        return false;
+      }
+      
+      // 更新账号对象中的cookies
+      account.cookies = filteredCookies;
+      account.lastCookieSave = Date.now();
+      
+      // 更新账号状态为在线
+      account.status = 'online';
+      
+      // 保存到数据库
+      const saveResult = this.dbManager.saveCookies(
+        accountId, 
+        account.platform, 
+        account.username, 
+        filteredCookies
+      );
+      
+      if (saveResult) {
+        console.log(`成功保存账号 ${account.username} 的cookies到数据库`);
         
-        // 保存更新后的账号信息
-        try {
-          await this.saveAccounts();
-        } catch (err) {
-          console.error(`更新账号cookie信息失败: ${err.message}`);
+        // 保存账号列表以更新状态
+        await this.saveAccounts();
+        
+        return true;
+      } else {
+        console.error(`保存账号 ${account.username} 的cookies到数据库失败`);
+        return false;
+      }
+    } catch (error) {
+      console.error(`保存cookies过程中发生错误:`, error);
+      return false;
+    }
+  }
+
+  /**
+   * 为指定账号加载Cookie到session中
+   * @param {string} accountId 账号ID
+   * @param {Electron.Session} session 需要设置Cookie的session
+   * @param {string} url 设置cookie的URL，必须提供
+   * @returns {Promise<boolean>} 是否成功加载
+   */
+  async loadCookiesForAccount(accountId, session, url) {
+    try {
+      // 检查参数
+      if (!accountId) {
+        console.error('加载Cookie失败：账号ID为空');
+        return false;
+      }
+      
+      if (!session) {
+        console.error('加载Cookie失败：session为空');
+        return false;
+      }
+      
+      if (!url) {
+        console.error('加载Cookie失败：URL为空');
+        return false;
+      }
+      
+      // 确保accountCookies已初始化
+      if (!this.accountCookies) {
+        this.accountCookies = {};
+      }
+      
+      // 首先尝试从内存中获取
+      let cookies = this.accountCookies[accountId];
+      
+      // 如果内存中没有，尝试从数据库加载
+      if (!cookies || !cookies.length) {
+        if (this.dbManager) {
+          try {
+            cookies = this.dbManager.loadCookies(accountId);
+            if (cookies && cookies.length > 0) {
+              console.log(`从数据库中加载账号 ${accountId} 的cookies，数量: ${cookies.length}`);
+              this.accountCookies[accountId] = cookies;
+            } else {
+              console.log(`数据库中没有找到账号 ${accountId} 的cookies`);
+            }
+          } catch (dbErr) {
+            console.error('从数据库加载cookie失败:', dbErr);
+          }
         }
       }
       
+      // 如果数据库中也没有，尝试从文件加载（向后兼容）
+      if (!cookies || !cookies.length) {
+        try {
+          const cookiePath = path.join(
+            app.getPath('userData'),
+            'cookies',
+            `${accountId}.json`
+          );
+          
+          if (fs.existsSync(cookiePath)) {
+            const cookieData = fs.readFileSync(cookiePath, 'utf8');
+            if (cookieData && cookieData.trim()) {
+              try {
+                cookies = JSON.parse(cookieData);
+                if (Array.isArray(cookies) && cookies.length > 0) {
+                  console.log(`从文件加载账号 ${accountId} 的cookies，数量: ${cookies.length}`);
+                  this.accountCookies[accountId] = cookies;
+                } else {
+                  console.log(`文件中的账号 ${accountId} cookie数据无效或为空`);
+                }
+              } catch (parseErr) {
+                console.error('解析cookie文件失败:', parseErr);
+              }
+            }
+          } else {
+            console.log(`账号 ${accountId} 的cookie文件不存在`);
+          }
+        } catch (fileErr) {
+          console.error('从文件加载cookie失败:', fileErr);
+        }
+      }
+      
+      // 如果没有找到cookie，返回失败
+      if (!cookies || !cookies.length) {
+        console.log(`未找到账号 ${accountId} 的cookies，登录可能需要重新输入凭据`);
+        return false;
+      }
+      
+      // 设置cookies到session
+      let successCount = 0;
+      const cookiePromises = cookies.map(cookie => {
+        // 过滤和清理cookie对象
+        const cookieObj = {
+          url: url,
+          name: cookie.name,
+          value: cookie.value,
+          domain: cookie.domain,
+          path: cookie.path || '/',
+          secure: !!cookie.secure,
+          httpOnly: !!cookie.httpOnly,
+          expirationDate: cookie.expirationDate || (Date.now() / 1000) + 86400 * 30, // 30天后过期
+        };
+        
+        // 添加可选字段
+        if (cookie.sameSite) {
+          cookieObj.sameSite = cookie.sameSite;
+        }
+        
+        // 设置cookie
+        return session.cookies.set(cookieObj)
+          .then(() => {
+            successCount++;
+            return true;
+          })
+          .catch(err => {
+            console.error(`设置cookie ${cookie.name} 失败:`, err);
+            return false;
+          });
+      });
+      
+      // 等待所有cookie设置完成
+      await Promise.all(cookiePromises);
+      
+      console.log(`成功设置 ${successCount}/${cookies.length} 个cookies到账号 ${accountId} 的session`);
       return successCount > 0;
-    } catch (err) {
-      console.error(`从文件加载cookie失败: ${err.message}`);
+    } catch (error) {
+      console.error(`为账号 ${accountId} 加载cookies失败:`, error);
       return false;
     }
   }
@@ -1304,8 +1249,8 @@ class AccountManager extends EventEmitter {
           }
           
           // 检查是否有保存的cookie
-          if (account.cookies && account.lastCookieSaveTime) {
-            const lastSaveTime = new Date(account.lastCookieSaveTime);
+          if (account.cookies && account.lastCookieSave) {
+            const lastSaveTime = new Date(account.lastCookieSave);
             const now = new Date();
             const hoursSinceSave = (now - lastSaveTime) / (1000 * 60 * 60);
             
@@ -1380,8 +1325,8 @@ class AccountManager extends EventEmitter {
       
       // 检查是否有保存的cookie
       let hasValidCookie = false;
-      if (account.cookies && account.lastCookieSaveTime) {
-        const lastSaveTime = new Date(account.lastCookieSaveTime);
+      if (account.cookies && account.lastCookieSave) {
+        const lastSaveTime = new Date(account.lastCookieSave);
         const now = new Date();
         const hoursSinceSave = (now - lastSaveTime) / (1000 * 60 * 60);
         
@@ -1692,101 +1637,48 @@ class AccountManager extends EventEmitter {
 
   /**
    * 设置自动会话维护
-   * @param {boolean} enable - 是否启用自动会话维护
-   * @param {number} [intervalMinutes=60] - 会话维护间隔（分钟）
-   * @param {boolean} [runImmediately=true] - 是否立即执行一次会话维护
-   * @returns {boolean} 设置是否成功
+   * @param {boolean} enable - 是否启用
+   * @param {number} intervalMinutes - 间隔分钟数
+   * @param {boolean} runImmediately - 是否立即执行一次
+   * @returns {boolean} - 设置是否成功
    */
-  setAutoSessionMaintenance(enable, intervalMinutes = 60, runImmediately = true) {
+  setAutoSessionMaintenance(enable, intervalMinutes = 60, runImmediately = false) {
     try {
-      // 清除现有的定时器
-      if (this.sessionMaintenanceTimer) {
-        clearInterval(this.sessionMaintenanceTimer);
-        this.sessionMaintenanceTimer = null;
-        console.log('已清除现有的会话维护定时器');
+      // 停止现有的维护任务
+      if (this.maintenanceTimer) {
+        clearInterval(this.maintenanceTimer);
+        this.maintenanceTimer = null;
       }
       
-      if (enable) {
-        // 验证并调整间隔时间
-        let interval = parseInt(intervalMinutes, 10);
-        
-        if (isNaN(interval) || interval < 30) {
-          console.warn(`会话维护间隔时间 ${intervalMinutes} 分钟过短，已调整为最小值 30 分钟`);
-          interval = 30; // 最小间隔30分钟
-        } else if (interval > 1440) {
-          console.warn(`会话维护间隔时间 ${intervalMinutes} 分钟过长，已调整为最大值 1440 分钟（24小时）`);
-          interval = 1440; // 最大间隔24小时
-        }
-        
-        const intervalMs = interval * 60 * 1000; // 转换为毫秒
-        const nextMaintenanceTime = new Date(Date.now() + intervalMs);
-        const formattedTime = nextMaintenanceTime.toLocaleTimeString();
-        const formattedDate = nextMaintenanceTime.toLocaleDateString();
-        
-        console.log(`启用自动会话维护，间隔: ${interval} 分钟`);
-        console.log(`下次会话维护时间: ${formattedDate} ${formattedTime}`);
-        
-        // 设置定时器
-        this.sessionMaintenanceTimer = setInterval(async () => {
-          try {
-            console.log(`定时会话维护开始执行，当前时间: ${new Date().toLocaleString()}`);
-            const result = await this.maintainSessions();
-            
-            // 记录详细的维护结果
-            console.log(`定时会话维护完成: 共 ${result.total} 个账号，成功: ${result.success}，失败: ${result.failed}`);
-            
-            // 计算下次维护时间
-            const nextTime = new Date(Date.now() + intervalMs);
-            console.log(`下次会话维护时间: ${nextTime.toLocaleDateString()} ${nextTime.toLocaleTimeString()}`);
-            
-            // 如果有失败的账号，发送通知
-            if (result.failed > 0) {
-              this.emitEvent('session-maintenance-warning', {
-                message: `会话维护警告: ${result.failed} 个账号维护失败`,
-                result: result
-              });
-            }
-            
-            // 发送会话维护完成事件
-            this.emitEvent('session-maintenance-complete', result);
-          } catch (error) {
-            console.error('执行定时会话维护时出错:', error);
-            this.emitEvent('session-maintenance-error', {
-              message: '执行定时会话维护时出错',
-              error: error.message
-            });
-          }
-        }, intervalMs);
-        
-        // 是否立即执行一次
-        if (runImmediately) {
-          console.log('立即执行一次会话维护...');
-          
-          // 使用setTimeout确保异步执行不阻塞主流程
-          setTimeout(async () => {
-            try {
-              const result = await this.maintainSessions();
-              console.log(`立即会话维护完成: 共 ${result.total} 个账号，成功: ${result.success}，失败: ${result.failed}`);
-              
-              // 发送会话维护完成事件
-              this.emitEvent('session-maintenance-complete', result);
-            } catch (error) {
-              console.error('执行立即会话维护时出错:', error);
-              this.emitEvent('session-maintenance-error', {
-                message: '执行立即会话维护时出错',
-                error: error.message
-              });
-            }
-          }, 5000); // 延迟5秒执行，避免与其他初始化操作冲突
-        }
-        
-        return true;
-      } else {
-        console.log('已禁用自动会话维护');
+      // 如果禁用，直接返回
+      if (!enable) {
+        console.log('自动会话维护已禁用');
         return true;
       }
+      
+      // 计算间隔毫秒数
+      const intervalMs = intervalMinutes * 60 * 1000;
+      
+      // 设置新的维护任务
+      this.maintenanceTimer = setInterval(() => {
+        this.maintainSessions();
+      }, intervalMs);
+      
+      console.log(`自动会话维护已启用，间隔: ${intervalMinutes} 分钟`);
+      
+      // 如果需要立即执行
+      if (runImmediately) {
+        console.log('立即执行一次会话维护');
+        setTimeout(() => this.maintainSessions(), 5000);
+      } else {
+        // 5秒后执行第一次维护
+        console.log('会话维护将在5秒后首次执行');
+        setTimeout(() => this.maintainSessions(), 5000);
+      }
+      
+      return true;
     } catch (error) {
-      console.error('设置自动会话维护时出错:', error);
+      console.error('设置自动会话维护失败:', error);
       return false;
     }
   }
@@ -1801,6 +1693,22 @@ class AccountManager extends EventEmitter {
       this.emit(eventName, data);
     } catch (error) {
       console.error(`发送事件 ${eventName} 失败:`, error);
+    }
+  }
+
+  /**
+   * 应用退出前清理
+   */
+  cleanup() {
+    // 停止维护计时器
+    if (this.maintenanceTimer) {
+      clearInterval(this.maintenanceTimer);
+      this.maintenanceTimer = null;
+    }
+    
+    // 关闭数据库连接
+    if (this.dbManager) {
+      this.dbManager.close();
     }
   }
 }
