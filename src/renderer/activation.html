@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>软件激活</title>
+  <style>
+    body {
+      font-family: 'Microsoft YaHei', 'PingFang SC', sans-serif;
+      margin: 0;
+      padding: 20px;
+      background-color: #f5f5f5;
+      color: #333;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: calc(100vh - 40px);
+    }
+    .activation-container {
+      width: 100%;
+      max-width: 450px;
+      background-color: #fff;
+      border-radius: 8px;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+      padding: 20px;
+    }
+    h1 {
+      text-align: center;
+      color: #1890ff;
+      margin-bottom: 20px;
+    }
+    .form-group {
+      margin-bottom: 15px;
+    }
+    label {
+      display: block;
+      margin-bottom: 5px;
+      font-weight: bold;
+    }
+    input {
+      width: 100%;
+      padding: 10px;
+      border: 1px solid #d9d9d9;
+      border-radius: 4px;
+      font-size: 14px;
+      box-sizing: border-box;
+    }
+    button {
+      background-color: #1890ff;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+      width: 100%;
+      margin-top: 10px;
+    }
+    button:hover {
+      background-color: #40a9ff;
+    }
+    button:disabled {
+      background-color: #ccc;
+      cursor: not-allowed;
+    }
+    .status {
+      margin-top: 15px;
+      padding: 10px;
+      border-radius: 4px;
+      text-align: center;
+    }
+    .status.success {
+      background-color: #f6ffed;
+      border: 1px solid #b7eb8f;
+      color: #52c41a;
+    }
+    .status.error {
+      background-color: #fff2f0;
+      border: 1px solid #ffccc7;
+      color: #ff4d4f;
+    }
+    .status.warning {
+      background-color: #fffbe6;
+      border: 1px solid #ffe58f;
+      color: #faad14;
+    }
+    .logo {
+      text-align: center;
+      margin-bottom: 20px;
+    }
+    .logo img {
+      max-width: 120px;
+      max-height: 120px;
+    }
+    .activation-info {
+      margin-top: 15px;
+      padding: 10px;
+      background-color: #e6f7ff;
+      border: 1px solid #91d5ff;
+      border-radius: 4px;
+    }
+    .activation-info p {
+      margin: 5px 0;
+    }
+    .expiry-date {
+      font-weight: bold;
+      color: #1890ff;
+    }
+  </style>
+</head>
+<body>
+  <div class="activation-container">
+    <div class="logo">
+      <h2>外卖账号管理器</h2>
+    </div>
+    <h1>软件激活</h1>
+    
+    <div id="activation-info" class="activation-info" style="display: none;">
+      <p id="activation-status">激活状态: <span id="status-text">未激活</span></p>
+      <p id="expiry-info" style="display: none;">到期时间: <span id="expiry-date" class="expiry-date"></span></p>
+      <p id="time-left" style="display: none;">剩余时间: <span id="time-left-value"></span></p>
+    </div>
+    
+    <div class="form-group">
+      <label for="activationCode">激活码</label>
+      <input type="text" id="activationCode" placeholder="请输入您的激活码">
+    </div>
+    
+    <button id="activateBtn">激活软件</button>
+    
+    <div id="status" class="status" style="display: none;"></div>
+  </div>
+
+  <script>
+    // 激活按钮点击事件
+    document.getElementById('activateBtn').addEventListener('click', async () => {
+      const activateBtn = document.getElementById('activateBtn');
+      const statusDiv = document.getElementById('status');
+      const activationCode = document.getElementById('activationCode').value.trim();
+      
+      if (!activationCode) {
+        showStatus('请输入激活码', 'error');
+        return;
+      }
+      
+      try {
+        activateBtn.disabled = true;
+        showStatus('正在激活...', 'warning');
+        
+        // 发送激活请求
+        const result = await window.electronAPI.activateSoftware(activationCode);
+        
+        if (result.success) {
+          showStatus(result.message, 'success');
+          updateActivationInfo(result);
+        } else {
+          showStatus(result.message, 'error');
+          activateBtn.disabled = false;
+        }
+      } catch (error) {
+        showStatus('激活过程中出错: ' + (error.message || error), 'error');
+        console.error('激活错误:', error);
+        activateBtn.disabled = false;
+      }
+    });
+    
+    // 显示状态信息
+    function showStatus(message, type) {
+      const statusDiv = document.getElementById('status');
+      statusDiv.textContent = message;
+      statusDiv.className = 'status ' + type;
+      statusDiv.style.display = 'block';
+    }
+    
+    // 更新激活信息显示
+    function updateActivationInfo(data) {
+      const infoDiv = document.getElementById('activation-info');
+      const statusText = document.getElementById('status-text');
+      const expiryInfo = document.getElementById('expiry-info');
+      const expiryDate = document.getElementById('expiry-date');
+      const timeLeft = document.getElementById('time-left');
+      const timeLeftValue = document.getElementById('time-left-value');
+      
+      infoDiv.style.display = 'block';
+      
+      if (data.activated || data.success) {
+        statusText.textContent = '已激活';
+        statusText.style.color = '#52c41a';
+        
+        if (data.isPermanent) {
+          timeLeft.style.display = 'block';
+          timeLeftValue.textContent = '永久有效';
+          expiryInfo.style.display = 'none';
+        } else {
+          const expiry = new Date(data.expiryDate);
+          expiryInfo.style.display = 'block';
+          expiryDate.textContent = expiry.toLocaleString();
+          
+          timeLeft.style.display = 'block';
+          if (data.hoursLeft < 24) {
+            timeLeftValue.textContent = `${data.hoursLeft}小时`;
+          } else {
+            timeLeftValue.textContent = `${data.daysLeft}天`;
+          }
+        }
+        
+        // 禁用激活按钮和输入框
+        document.getElementById('activateBtn').disabled = true;
+        document.getElementById('activationCode').disabled = true;
+      } else {
+        statusText.textContent = '未激活';
+        statusText.style.color = '#ff4d4f';
+        expiryInfo.style.display = 'none';
+        timeLeft.style.display = 'none';
+      }
+    }
+    
+    // 页面加载时检查激活状态
+    window.addEventListener('DOMContentLoaded', async () => {
+      try {
+        const status = await window.electronAPI.checkActivation();
+        if (status.activated) {
+          showStatus(status.message, 'success');
+          updateActivationInfo(status);
+        } else {
+          showStatus(status.message, 'warning');
+          document.getElementById('activation-info').style.display = 'block';
+          document.getElementById('status-text').textContent = '未激活';
+          document.getElementById('status-text').style.color = '#ff4d4f';
+        }
+      } catch (error) {
+        showStatus('检查激活状态失败: ' + (error.message || error), 'error');
+        console.error('检查激活状态失败:', error);
+      }
+    });
+  </script>
+</body>
+</html> 

@@ -7,6 +7,9 @@ const WindowManager = require('./window-manager');
 const { nativeImage } = require('electron');
 // 导入图标管理模块
 const iconManager = require('../../public/icon.js');
+// 导入激活管理器
+const { ActivationManager } = require('./activation-manager');
+const { DbManager } = require('./db-manager');
 
 // 实现单实例锁定，防止多个实例同时运行
 const gotTheLock = app.requestSingleInstanceLock();
@@ -30,12 +33,16 @@ if (!gotTheLock) {
 // 加密密钥 - 用于加密存储的账号信息
 // 注意：在实际生产环境中，应从安全的环境变量或配置文件中获取
 const ENCRYPTION_KEY = 'waimai-account-manager-encryption-key-v1';
+// 激活系统密钥
+const ACTIVATION_KEY = 'g7NqT9Aw3K5sV8yP';
 
 // 全局变量
 let mainWindow = null;
 let tray = null;
 let accountManager = null;
 let windowManager = null;
+let activationManager = null; // 激活管理器
+let activationWindow = null; // 激活窗口
 let isQuitting = false;
 
 // 平台图标定义
@@ -69,38 +76,129 @@ function initApp() {
     // 设置窗口管理器
     accountManager.setWindowManager(windowManager);
     
-    // 创建主窗口
-    createMainWindow();
-    
-    // 尝试创建系统托盘，但允许失败
-    try {
-      createTray();
-    } catch (trayError) {
-      console.error('创建系统托盘失败，但应用将继续运行:', trayError);
-    }
-    
-    // 加载账号
-    accountManager.loadAccounts().then(accounts => {
-      console.log(`成功加载账号列表，共 ${accounts.length} 个账号`);
-      // 更新托盘菜单
-      updateTrayMenu();
-    }).catch(err => {
-      console.error('加载账号列表失败:', err);
-      dialog.showErrorBox('加载账号失败', err.message);
-    });
-    
-    // 启用自动会话维护
-    const maintenanceInterval = 60; // 分钟
-    const runImmediately = false;
-    accountManager.setAutoSessionMaintenance(true, maintenanceInterval, runImmediately);
-    console.log(`已启用自动会话维护，间隔 ${maintenanceInterval} 分钟，首次执行将在应用启动 5 秒后进行`);
-    
     // 设置IPC处理程序
     setupIpcHandlers();
+    
+    // 创建激活管理器
+    activationManager = new ActivationManager(accountManager.dbManager, ACTIVATION_KEY);
+    
+    // 检查激活状态
+    checkActivation();
   } catch (error) {
     console.error('初始化应用失败:', error);
     dialog.showErrorBox('初始化失败', error.message);
   }
+}
+
+/**
+ * 检查激活状态
+ */
+async function checkActivation() {
+  try {
+    const activationStatus = await activationManager.checkActivation();
+    
+    if (!activationStatus.activated) {
+      // 如果未激活，显示激活窗口
+      showActivationWindow();
+    } else {
+      console.log(`软件已激活，剩余天数: ${activationStatus.daysLeft}`);
+      // 如果已激活，继续初始化应用
+      continueInitApp();
+    }
+  } catch (error) {
+    console.error('检查激活状态失败:', error);
+    dialog.showErrorBox('激活检查失败', error.message);
+    // 出错时也显示激活窗口
+    showActivationWindow();
+  }
+}
+
+/**
+ * 显示激活窗口
+ */
+function showActivationWindow() {
+  // 如果激活窗口已存在，则显示它
+  if (activationWindow && !activationWindow.isDestroyed()) {
+    activationWindow.show();
+    activationWindow.focus();
+    return;
+  }
+  
+  // 创建激活窗口
+  activationWindow = new BrowserWindow({
+    width: 500,
+    height: 600,
+    resizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    show: false,
+    title: '软件激活',
+    icon: iconManager.getIconPath('app'),
+    webPreferences: {
+      preload: path.join(__dirname, '../preload/preload.js'), // 修正预加载脚本路径
+      nodeIntegration: false,
+      contextIsolation: true
+    }
+  });
+  
+  // 加载激活页面
+  activationWindow.loadFile(path.join(__dirname, '../renderer/activation.html'));
+  
+  // 窗口准备好时显示
+  activationWindow.once('ready-to-show', () => {
+    activationWindow.show();
+  });
+  
+  // 阻止关闭窗口，如果软件未激活
+  activationWindow.on('close', (event) => {
+    if (!isQuitting) {
+      event.preventDefault();
+      dialog.showMessageBox(activationWindow, {
+        type: 'warning',
+        title: '软件未激活',
+        message: '软件需要激活才能使用。如果关闭此窗口，应用将退出。',
+        buttons: ['继续激活', '退出应用'],
+        defaultId: 0
+      }).then(({ response }) => {
+        if (response === 1) {
+          isQuitting = true;
+          app.quit();
+        }
+      });
+    }
+  });
+}
+
+/**
+ * 继续初始化应用
+ * 在激活成功后调用
+ */
+function continueInitApp() {
+  // 创建主窗口
+  createMainWindow();
+  
+  // 尝试创建系统托盘，但允许失败
+  try {
+    createTray();
+  } catch (trayError) {
+    console.error('创建系统托盘失败，但应用将继续运行:', trayError);
+  }
+  
+  // 加载账号
+  accountManager.loadAccounts().then(accounts => {
+    console.log(`成功加载账号列表，共 ${accounts.length} 个账号`);
+    // 更新托盘菜单
+    updateTrayMenu();
+  }).catch(err => {
+    console.error('加载账号列表失败:', err);
+    dialog.showErrorBox('加载账号失败', err.message);
+  });
+  
+  // 启用自动会话维护
+  const maintenanceInterval = 60; // 分钟
+  const runImmediately = false;
+  accountManager.setAutoSessionMaintenance(true, maintenanceInterval, runImmediately);
+  console.log(`已启用自动会话维护，间隔 ${maintenanceInterval} 分钟，首次执行将在应用启动 5 秒后进行`);
 }
 
 /**
@@ -211,6 +309,50 @@ function createTray() {
  * 设置IPC通信
  */
 function setupIpcHandlers() {
+  // 激活软件
+  ipcMain.handle('activate-software', async (event, activationCode) => {
+    try {
+      console.log('收到激活请求:', activationCode);
+      const result = await activationManager.activateSoftware(activationCode);
+      
+      if (result.success) {
+        // 激活成功，继续初始化应用
+        continueInitApp();
+        
+        // 关闭激活窗口
+        if (activationWindow && !activationWindow.isDestroyed()) {
+          setTimeout(() => {
+            activationWindow.close();
+            activationWindow = null;
+          }, 2000);
+        }
+      }
+      
+      return result;
+    } catch (error) {
+      console.error('激活软件失败:', error);
+      return { 
+        success: false, 
+        message: '激活过程中出错',
+        error: error.message
+      };
+    }
+  });
+  
+  // 激活窗口完成
+  ipcMain.on('activation-complete', () => {
+    // 关闭激活窗口
+    if (activationWindow && !activationWindow.isDestroyed()) {
+      activationWindow.close();
+      activationWindow = null;
+    }
+  });
+  
+  // 激活窗口准备就绪
+  ipcMain.on('activation-window-ready', () => {
+    console.log('激活窗口已准备就绪');
+  });
+  
   // 获取账号列表
   ipcMain.handle('get-accounts', async () => {
     try {
@@ -369,6 +511,11 @@ function setupIpcHandlers() {
       console.error('维护所有会话失败:', error);
       throw error;
     }
+  });
+
+  // 激活相关IPC处理
+  ipcMain.handle('check-activation', async () => {
+    return await activationManager.checkActivation();
   });
 }
 

@@ -65,5 +65,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
   batchLoginAccounts: (options) => ipcRenderer.invoke('batch-login-accounts', options),
   
   // 维护所有会话
-  maintainAllSessions: () => ipcRenderer.invoke('maintain-all-sessions')
+  maintainAllSessions: () => ipcRenderer.invoke('maintain-all-sessions'),
+  
+  // 激活软件
+  activateSoftware: (activationCode) => ipcRenderer.invoke('activate-software', { activationCode }),
+  
+  // 通知激活完成
+  notifyActivationComplete: () => ipcRenderer.send('activation-complete'),
+  
+  // 通知激活窗口已准备就绪
+  notifyActivationWindowReady: () => ipcRenderer.send('activation-window-ready')
 });

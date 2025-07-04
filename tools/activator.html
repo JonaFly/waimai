@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>激活码生成器</title>
+    <style>
+        body {
+            font-family: 'Arial', 'Microsoft YaHei', sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background-color: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        }
+        h1 {
+            color: #333;
+            border-bottom: 2px solid #eee;
+            padding-bottom: 10px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input, select {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 15px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        .result {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #f9f9f9;
+            border-left: 4px solid #4CAF50;
+            display: none;
+        }
+        .activation-code {
+            font-family: monospace;
+            font-size: 18px;
+            background-color: #eee;
+            padding: 10px;
+            border-radius: 4px;
+            text-align: center;
+            margin: 10px 0;
+            word-break: break-all;
+        }
+        .copy-btn {
+            background-color: #2196F3;
+            margin-left: 10px;
+        }
+        .copy-btn:hover {
+            background-color: #0b7dda;
+        }
+        .history {
+            margin-top: 30px;
+            border-top: 2px solid #eee;
+            padding-top: 20px;
+        }
+        .history-item {
+            padding: 10px;
+            background-color: #f9f9f9;
+            margin-bottom: 10px;
+            border-radius: 4px;
+        }
+        .history-item p {
+            margin: 5px 0;
+        }
+        .duration-container {
+            display: flex;
+            gap: 10px;
+        }
+        .duration-container input {
+            flex: 1;
+        }
+        .duration-container select {
+            flex: 1;
+        }
+        .preset-durations {
+            margin-top: 10px;
+        }
+        .preset-btn {
+            margin-right: 5px;
+            margin-bottom: 5px;
+            padding: 5px 10px;
+            background-color: #f0f0f0;
+            border: 1px solid #ddd;
+            border-radius: 3px;
+            cursor: pointer;
+        }
+        .preset-btn:hover {
+            background-color: #e0e0e0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>激活码生成器</h1>
+        
+        <div class="form-group">
+            <label for="customerName">客户名称</label>
+            <input type="text" id="customerName" placeholder="输入客户名称" required>
+        </div>
+        
+        <div class="form-group">
+            <label for="durationValue">激活时长</label>
+            <div class="duration-container">
+                <input type="number" id="durationValue" min="1" value="30" required>
+                <select id="durationUnit">
+                    <option value="hours">小时</option>
+                    <option value="days" selected>天</option>
+                    <option value="months">月</option>
+                    <option value="years">年</option>
+                    <option value="permanent">永久</option>
+                </select>
+            </div>
+            
+            <div class="preset-durations">
+                <button type="button" class="preset-btn" data-value="1" data-unit="hours">1小时</button>
+                <button type="button" class="preset-btn" data-value="24" data-unit="hours">24小时</button>
+                <button type="button" class="preset-btn" data-value="2" data-unit="days">2天</button>
+                <button type="button" class="preset-btn" data-value="7" data-unit="days">7天</button>
+                <button type="button" class="preset-btn" data-value="30" data-unit="days">30天</button>
+                <button type="button" class="preset-btn" data-value="1" data-unit="years">1年</button>
+                <button type="button" class="preset-btn" data-value="0" data-unit="permanent">永久</button>
+            </div>
+        </div>
+        
+        <button id="generateBtn">生成激活码</button>
+        
+        <div id="result" class="result">
+            <h3>生成的激活码：</h3>
+            <div class="activation-code" id="activationCode"></div>
+            <button id="copyBtn" class="copy-btn">复制激活码</button>
+        </div>
+        
+        <div class="history">
+            <h2>历史记录</h2>
+            <div id="historyContainer"></div>
+        </div>
+    </div>
+
+    <script>
+        // 安全密钥（需要与软件中的密钥一致）
+        const SECRET_KEY = 'g7NqT9Aw3K5sV8yP';
+        
+        // 加载历史记录
+        let history = JSON.parse(localStorage.getItem('activationHistory') || '[]');
+        renderHistory();
+        
+        // 预设按钮点击事件
+        document.querySelectorAll('.preset-btn').forEach(btn => {
+            btn.addEventListener('click', function() {
+                const value = this.getAttribute('data-value');
+                const unit = this.getAttribute('data-unit');
+                
+                document.getElementById('durationValue').value = value;
+                document.getElementById('durationUnit').value = unit;
+                
+                // 如果选择永久，禁用时长输入框
+                if (unit === 'permanent') {
+                    document.getElementById('durationValue').disabled = true;
+                } else {
+                    document.getElementById('durationValue').disabled = false;
+                }
+            });
+        });
+        
+        // 监听时间单位变化
+        document.getElementById('durationUnit').addEventListener('change', function() {
+            if (this.value === 'permanent') {
+                document.getElementById('durationValue').disabled = true;
+            } else {
+                document.getElementById('durationValue').disabled = false;
+            }
+        });
+        
+        // 生成按钮点击事件
+        document.getElementById('generateBtn').addEventListener('click', function() {
+            const customerName = document.getElementById('customerName').value.trim();
+            const durationValue = parseInt(document.getElementById('durationValue').value) || 0;
+            const durationUnit = document.getElementById('durationUnit').value;
+            
+            if (!customerName) {
+                alert('请输入客户名称');
+                return;
+            }
+            
+            // 计算总时长（转换为小时）
+            let totalHours;
+            let durationText;
+            
+            if (durationUnit === 'permanent') {
+                totalHours = 24 * 365 * 100; // 100年（实际上是永久）
+                durationText = '永久';
+            } else {
+                switch (durationUnit) {
+                    case 'hours':
+                        totalHours = durationValue;
+                        durationText = `${durationValue}小时`;
+                        break;
+                    case 'days':
+                        totalHours = durationValue * 24;
+                        durationText = `${durationValue}天`;
+                        break;
+                    case 'months':
+                        totalHours = durationValue * 30 * 24; // 近似值
+                        durationText = `${durationValue}个月`;
+                        break;
+                    case 'years':
+                        totalHours = durationValue * 365 * 24; // 近似值
+                        durationText = `${durationValue}年`;
+                        break;
+                    default:
+                        totalHours = durationValue * 24; // 默认按天计算
+                        durationText = `${durationValue}天`;
+                }
+            }
+            
+            const code = generateActivationCode(customerName, totalHours, durationUnit);
+            document.getElementById('activationCode').textContent = formatActivationCode(code);
+            document.getElementById('result').style.display = 'block';
+            
+            // 添加到历史记录
+            const now = new Date();
+            const expiryDate = new Date(now);
+            expiryDate.setHours(expiryDate.getHours() + totalHours);
+            
+            history.unshift({
+                customer: customerName,
+                code: code,
+                durationValue: durationValue,
+                durationUnit: durationUnit,
+                durationText: durationText,
+                totalHours: totalHours,
+                generated: now.toISOString(),
+                expires: expiryDate.toISOString()
+            });
+            
+            // 只保存最近的50条记录
+            if (history.length > 50) {
+                history = history.slice(0, 50);
+            }
+            
+            localStorage.setItem('activationHistory', JSON.stringify(history));
+            renderHistory();
+        });
+        
+        // 复制按钮点击事件
+        document.getElementById('copyBtn').addEventListener('click', function() {
+            const code = document.getElementById('activationCode').textContent;
+            navigator.clipboard.writeText(code).then(() => {
+                this.textContent = '已复制';
+                setTimeout(() => {
+                    this.textContent = '复制激活码';
+                }, 2000);
+            }).catch(err => {
+                console.error('复制失败:', err);
+                alert('复制失败，请手动复制');
+            });
+        });
+        
+        /**
+         * 生成激活码
+         * @param {string} customerName 客户名称
+         * @param {number} totalHours 激活时长（小时）
+         * @param {string} durationUnit 时间单位
+         * @returns {string} 激活码
+         */
+        function generateActivationCode(customerName, totalHours, durationUnit) {
+            const now = new Date();
+            const expiryDate = new Date(now);
+            expiryDate.setHours(expiryDate.getHours() + totalHours);
+            
+            // 创建激活码数据对象
+            const activationData = {
+                customer: customerName,
+                created: now.getTime(),
+                expires: expiryDate.getTime(),
+                totalHours: totalHours,
+                unit: durationUnit
+            };
+            
+            // 计算校验和
+            activationData.checksum = calculateChecksum(JSON.stringify(activationData) + SECRET_KEY);
+            
+            // 转换为JSON并进行Base64编码
+            const jsonString = JSON.stringify(activationData);
+            const base64 = btoa(jsonString);
+            
+            return base64;
+        }
+        
+        /**
+         * 格式化激活码为易读格式
+         * @param {string} code 原始激活码
+         * @returns {string} 格式化后的激活码
+         */
+        function formatActivationCode(code) {
+            // 每5个字符加一个连字符，使激活码更易读
+            return code.match(/.{1,5}/g).join('-');
+        }
+        
+        /**
+         * 计算校验和
+         * @param {string} str 输入字符串
+         * @returns {string} 校验和
+         */
+        function calculateChecksum(str) {
+            let hash = 0;
+            for (let i = 0; i < str.length; i++) {
+                hash = ((hash << 5) - hash) + str.charCodeAt(i);
+                hash |= 0; // 转换为32位整数
+            }
+            return Math.abs(hash).toString(16);
+        }
+        
+        /**
+         * 渲染历史记录
+         */
+        function renderHistory() {
+            const container = document.getElementById('historyContainer');
+            container.innerHTML = '';
+            
+            if (history.length === 0) {
+                container.innerHTML = '<p>暂无记录</p>';
+                return;
+            }
+            
+            history.forEach((item, index) => {
+                const div = document.createElement('div');
+                div.className = 'history-item';
+                
+                const generated = new Date(item.generated);
+                const expires = new Date(item.expires);
+                const isPermanent = item.durationUnit === 'permanent';
+                
+                div.innerHTML = `
+                    <p><strong>客户名称:</strong> ${item.customer}</p>
+                    <p><strong>激活码:</strong> ${formatActivationCode(item.code)}</p>
+                    <p><strong>生成时间:</strong> ${generated.toLocaleString()}</p>
+                    <p><strong>有效期:</strong> ${item.durationText || '未知'} ${isPermanent ? '' : `(到${expires.toLocaleDateString()} ${expires.toLocaleTimeString()})`}</p>
+                `;
+                
+                container.appendChild(div);
+            });
+        }
+    </script>
+</body>
+</html> 
